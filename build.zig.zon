@@ -1,0 +1,12 @@
+.{
+    .name = .zc_player,
+    .version = "0.0.0",
+    .fingerprint = 0x21a6b8256a43b5f3,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

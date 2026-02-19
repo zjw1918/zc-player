@@ -1,0 +1,28 @@
+# Zig build outputs
+.zig-cache/
+zig-out/
+
+# Vendored dependencies
+third_party/
+
+# Generated shader binaries
+src/shaders/*.spv
+
+# Editor and OS files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Runtime/local config
+imgui.ini
+
+# Generic build artifacts
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.exe

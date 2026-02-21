@@ -14,6 +14,7 @@ typedef struct {
     VkDevice device;
     VkQueue graphics_queue;
     uint32_t graphics_queue_family;
+    int portability_subset_supported;
     VkSwapchainKHR swapchain;
     VkFormat swapchain_format;
     VkExtent2D swapchain_extent;
@@ -34,9 +35,12 @@ typedef struct {
     int swapchain_needs_recreate;
     void (*render_callback)(void*);
     void* render_userdata;
+    void (*swapchain_recreate_callback)(void*);
+    void* swapchain_recreate_userdata;
 } App;
 
 void app_set_render_callback(App* app, void (*callback)(void*), void* userdata);
+void app_set_swapchain_recreate_callback(App* app, void (*callback)(void*), void* userdata);
 
 int app_init(App* app, const char* title, int width, int height);
 void app_destroy(App* app);

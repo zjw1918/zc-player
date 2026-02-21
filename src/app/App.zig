@@ -7,7 +7,7 @@ const gui = @import("../ffi/gui.zig").c;
 fn playerStateFromValue(value: c_int) gui.PlayerState {
     return switch (@typeInfo(gui.PlayerState)) {
         .@"enum" => @enumFromInt(value),
-        else => @as(gui.PlayerState, @intCast(value))
+        else => @as(gui.PlayerState, @intCast(value)),
     };
 }
 
@@ -42,6 +42,26 @@ fn renderVideoCallback(userdata: ?*anyopaque) callconv(.c) void {
     gui.ui_draw(app.*.command_buffers[app.*.current_frame]);
 }
 
+fn swapchainRecreatedCallback(userdata: ?*anyopaque) callconv(.c) void {
+    if (userdata == null) {
+        return;
+    }
+
+    const renderer: *gui.Renderer = @ptrCast(@alignCast(userdata.?));
+    if (gui.renderer_recreate_for_swapchain(renderer) != 0) {
+        if (renderer.app != null) {
+            renderer.app.*.running = 0;
+        }
+        return;
+    }
+
+    if (renderer.app == null) {
+        return;
+    }
+
+    gui.ui_on_swapchain_recreated(renderer.app);
+}
+
 pub const App = struct {
     allocator: std.mem.Allocator,
     engine: PlaybackEngine,
@@ -73,6 +93,7 @@ pub const App = struct {
         defer gui.renderer_destroy(&renderer);
 
         gui.app_set_render_callback(&app, renderVideoCallback, &renderer);
+        gui.app_set_swapchain_recreate_callback(&app, swapchainRecreatedCallback, &renderer);
 
         if (gui.ui_init(&app) != 0) {
             return error.UiInitFailed;

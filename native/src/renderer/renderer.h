@@ -41,6 +41,7 @@ typedef struct {
 int renderer_init(Renderer* ren, App* app);
 void renderer_destroy(Renderer* ren);
 int renderer_upload_video(Renderer* ren, uint8_t* data, int width, int height, int linesize);
+int renderer_recreate_for_swapchain(Renderer* ren);
 void renderer_render(Renderer* ren);
 
 #endif

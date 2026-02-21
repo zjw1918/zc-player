@@ -33,6 +33,7 @@ typedef struct {
 
 int ui_init(App* app);
 void ui_shutdown(void);
+void ui_on_swapchain_recreated(App* app);
 void ui_new_frame(void);
 void ui_render(UIState* ui, const PlaybackSnapshot* snapshot);
 void ui_draw(VkCommandBuffer cmd);

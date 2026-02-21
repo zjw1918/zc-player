@@ -185,6 +185,29 @@ void ui_shutdown(void) {
     g_ui_runtime.has_snapshot = 0;
 }
 
+void ui_on_swapchain_recreated(App* app) {
+    if (!g_ui_runtime.initialized) {
+        return;
+    }
+
+    if (app) {
+        g_ui_runtime.app = app;
+    }
+
+    if (!g_ui_runtime.app || !g_ui_runtime.app->device || !g_ui_runtime.app->render_pass) {
+        return;
+    }
+
+    uint32_t min_image_count = g_ui_runtime.app->swapchain_image_count > 1 ? g_ui_runtime.app->swapchain_image_count : 2;
+    ImGui_ImplVulkan_SetMinImageCount(min_image_count);
+
+    ImGui_ImplVulkan_PipelineInfo pipeline_info = {};
+    pipeline_info.RenderPass = g_ui_runtime.app->render_pass;
+    pipeline_info.Subpass = 0;
+    pipeline_info.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+    ImGui_ImplVulkan_CreateMainPipeline(&pipeline_info);
+}
+
 void ui_new_frame(void) {
     if (!g_ui_runtime.initialized) {
         return;

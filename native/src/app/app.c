@@ -34,8 +34,6 @@ static int check_validation_layer_support() {
 static int rate_device_suitability(VkPhysicalDevice device) {
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(device, &props);
-    VkPhysicalDeviceFeatures features;
-    vkGetPhysicalDeviceFeatures(device, &features);
 
     int score = 0;
     if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
@@ -43,6 +41,110 @@ static int rate_device_suitability(VkPhysicalDevice device) {
     }
     score += props.limits.maxImageDimension2D;
     return score;
+}
+
+static int has_device_extension(VkPhysicalDevice device, const char* extension_name) {
+    uint32_t extension_count = 0;
+    if (vkEnumerateDeviceExtensionProperties(device, NULL, &extension_count, NULL) != VK_SUCCESS || extension_count == 0) {
+        return 0;
+    }
+
+    VkExtensionProperties* extensions = malloc(extension_count * sizeof(VkExtensionProperties));
+    if (!extensions) {
+        return 0;
+    }
+
+    if (vkEnumerateDeviceExtensionProperties(device, NULL, &extension_count, extensions) != VK_SUCCESS) {
+        free(extensions);
+        return 0;
+    }
+
+    int found = 0;
+    for (uint32_t i = 0; i < extension_count; i++) {
+        if (strcmp(extensions[i].extensionName, extension_name) == 0) {
+            found = 1;
+            break;
+        }
+    }
+
+    free(extensions);
+    return found;
+}
+
+static int has_swapchain_support(VkPhysicalDevice device, VkSurfaceKHR surface) {
+    uint32_t format_count = 0;
+    if (vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &format_count, NULL) != VK_SUCCESS || format_count == 0) {
+        return 0;
+    }
+
+    uint32_t present_mode_count = 0;
+    if (vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &present_mode_count, NULL) != VK_SUCCESS || present_mode_count == 0) {
+        return 0;
+    }
+
+    return 1;
+}
+
+static int find_graphics_present_queue_family(VkPhysicalDevice device, VkSurfaceKHR surface, uint32_t* out_queue_family) {
+    uint32_t queue_family_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, NULL);
+    if (queue_family_count == 0) {
+        return 0;
+    }
+
+    VkQueueFamilyProperties* queue_families = malloc(queue_family_count * sizeof(VkQueueFamilyProperties));
+    if (!queue_families) {
+        return 0;
+    }
+
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, queue_families);
+
+    int found = 0;
+    uint32_t selected = 0;
+    for (uint32_t i = 0; i < queue_family_count; i++) {
+        if ((queue_families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0) {
+            continue;
+        }
+
+        VkBool32 present_supported = VK_FALSE;
+        if (vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &present_supported) != VK_SUCCESS) {
+            continue;
+        }
+
+        if (present_supported == VK_TRUE) {
+            selected = i;
+            found = 1;
+            break;
+        }
+    }
+
+    free(queue_families);
+
+    if (!found) {
+        return 0;
+    }
+
+    *out_queue_family = selected;
+    return 1;
+}
+
+static int is_device_suitable(App* app, VkPhysicalDevice device, uint32_t* out_queue_family, int* out_portability_subset_supported) {
+    if (!has_device_extension(device, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+        return 0;
+    }
+
+    if (!has_swapchain_support(device, app->surface)) {
+        return 0;
+    }
+
+    uint32_t queue_family = 0;
+    if (!find_graphics_present_queue_family(device, app->surface, &queue_family)) {
+        return 0;
+    }
+
+    *out_queue_family = queue_family;
+    *out_portability_subset_supported = has_device_extension(device, "VK_KHR_portability_subset");
+    return 1;
 }
 
 static int create_instance(App* app) {
@@ -91,15 +193,28 @@ static int pick_physical_device(App* app) {
     }
 
     VkPhysicalDevice* devices = malloc(device_count * sizeof(VkPhysicalDevice));
+    if (!devices) {
+        return -1;
+    }
     vkEnumeratePhysicalDevices(app->instance, &device_count, devices);
 
-    int best_score = 0;
+    int best_score = -1;
     int best_index = -1;
+    uint32_t best_queue_family = 0;
+    int best_portability_subset_supported = 0;
     for (uint32_t i = 0; i < device_count; i++) {
+        uint32_t queue_family = 0;
+        int portability_subset_supported = 0;
+        if (!is_device_suitable(app, devices[i], &queue_family, &portability_subset_supported)) {
+            continue;
+        }
+
         int score = rate_device_suitability(devices[i]);
         if (score > best_score) {
             best_score = score;
             best_index = i;
+            best_queue_family = queue_family;
+            best_portability_subset_supported = portability_subset_supported;
         }
     }
 
@@ -109,52 +224,40 @@ static int pick_physical_device(App* app) {
     }
 
     app->gpu = devices[best_index];
+    app->graphics_queue_family = best_queue_family;
+    app->portability_subset_supported = best_portability_subset_supported;
     free(devices);
     return 0;
 }
 
 static int create_logical_device(App* app) {
-    uint32_t queue_family_count = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(app->gpu, &queue_family_count, NULL);
-    VkQueueFamilyProperties* queue_families = malloc(queue_family_count * sizeof(VkQueueFamilyProperties));
-    vkGetPhysicalDeviceQueueFamilyProperties(app->gpu, &queue_family_count, queue_families);
-
-    int graphics_family = -1;
-    for (uint32_t i = 0; i < queue_family_count; i++) {
-        if (queue_families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-            graphics_family = i;
-            break;
-        }
-    }
-    free(queue_families);
-
-    if (graphics_family == -1) {
+    if (app->graphics_queue_family == UINT32_MAX) {
         return -1;
     }
-
-    app->graphics_queue_family = graphics_family;
 
     float queue_priority = 1.0f;
     VkDeviceQueueCreateInfo queue_create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        .queueFamilyIndex = graphics_family,
+        .queueFamilyIndex = app->graphics_queue_family,
         .queueCount = 1,
         .pQueuePriorities = &queue_priority,
     };
 
     VkPhysicalDeviceFeatures device_features = {};
 
-    const char* device_extensions[] = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        "VK_KHR_portability_subset",
-    };
+    const char* device_extensions[2] = {0};
+    uint32_t enabled_extension_count = 0;
+    device_extensions[enabled_extension_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    if (app->portability_subset_supported) {
+        device_extensions[enabled_extension_count++] = "VK_KHR_portability_subset";
+    }
 
     VkDeviceCreateInfo device_create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .queueCreateInfoCount = 1,
         .pQueueCreateInfos = &queue_create_info,
         .pEnabledFeatures = &device_features,
-        .enabledExtensionCount = 2,
+        .enabledExtensionCount = enabled_extension_count,
         .ppEnabledExtensionNames = device_extensions,
     };
 
@@ -162,7 +265,7 @@ static int create_logical_device(App* app) {
         return -1;
     }
 
-    vkGetDeviceQueue(app->device, graphics_family, 0, &app->graphics_queue);
+    vkGetDeviceQueue(app->device, app->graphics_queue_family, 0, &app->graphics_queue);
     return 0;
 }
 
@@ -486,8 +589,15 @@ static int recreate_swapchain(App* app) {
 
     vkDeviceWaitIdle(app->device);
     destroy_swapchain_resources(app);
+    if (app->render_pass) {
+        vkDestroyRenderPass(app->device, app->render_pass, NULL);
+        app->render_pass = VK_NULL_HANDLE;
+    }
 
     if (create_swapchain(app) != 0) {
+        return -1;
+    }
+    if (create_render_pass(app) != 0) {
         return -1;
     }
     if (create_framebuffers(app) != 0) {
@@ -502,15 +612,19 @@ static int recreate_swapchain(App* app) {
 
     app->swapchain_needs_recreate = 0;
     app->current_frame = 0;
+    if (app->swapchain_recreate_callback) {
+        app->swapchain_recreate_callback(app->swapchain_recreate_userdata);
+    }
     return 0;
 }
 
 int app_init(App* app, const char* title, int width, int height) {
     memset(app, 0, sizeof(App));
+    app->graphics_queue_family = UINT32_MAX;
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
-        return -1;
+        goto fail;
     }
 
     app->width = width;
@@ -520,7 +634,7 @@ int app_init(App* app, const char* title, int width, int height) {
     app->window = SDL_CreateWindow(title, width, height, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
     if (!app->window) {
         fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
-        return -1;
+        goto fail;
     }
 
     SDL_ShowWindow(app->window);
@@ -528,57 +642,61 @@ int app_init(App* app, const char* title, int width, int height) {
 
     if (create_instance(app) != 0) {
         fprintf(stderr, "failed to create instance!\n");
-        return -1;
+        goto fail;
     }
 
     if (create_surface(app) != 0) {
         fprintf(stderr, "failed to create surface!\n");
-        return -1;
+        goto fail;
     }
 
     if (pick_physical_device(app) != 0) {
         fprintf(stderr, "failed to find a suitable GPU!\n");
-        return -1;
+        goto fail;
     }
 
     if (create_logical_device(app) != 0) {
         fprintf(stderr, "failed to create logical device!\n");
-        return -1;
+        goto fail;
     }
 
     if (create_swapchain(app) != 0) {
         fprintf(stderr, "failed to create swap chain!\n");
-        return -1;
+        goto fail;
     }
 
     if (create_render_pass(app) != 0) {
         fprintf(stderr, "failed to create render pass!\n");
-        return -1;
+        goto fail;
     }
 
     if (create_framebuffers(app) != 0) {
         fprintf(stderr, "failed to create framebuffers!\n");
-        return -1;
+        goto fail;
     }
 
     if (create_command_pool(app) != 0) {
         fprintf(stderr, "failed to create command pool!\n");
-        return -1;
+        goto fail;
     }
 
     if (create_command_buffers(app) != 0) {
         fprintf(stderr, "failed to create command buffers!\n");
-        return -1;
+        goto fail;
     }
 
     if (create_sync_objects(app) != 0) {
         fprintf(stderr, "failed to create sync objects!\n");
-        return -1;
+        goto fail;
     }
 
     app->current_frame = 0;
     printf("Vulkan window created successfully!\n");
     return 0;
+
+fail:
+    app_destroy(app);
+    return -1;
 }
 
 void app_destroy(App* app) {
@@ -631,6 +749,11 @@ int app_poll_events(App* app) {
 void app_set_render_callback(App* app, void (*callback)(void*), void* userdata) {
     app->render_callback = callback;
     app->render_userdata = userdata;
+}
+
+void app_set_swapchain_recreate_callback(App* app, void (*callback)(void*), void* userdata) {
+    app->swapchain_recreate_callback = callback;
+    app->swapchain_recreate_userdata = userdata;
 }
 
 void app_present(App* app) {

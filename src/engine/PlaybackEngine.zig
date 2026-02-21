@@ -2,7 +2,6 @@ const std = @import("std");
 const CommandMod = @import("Command.zig");
 const Command = CommandMod.Command;
 const Snapshot = @import("Snapshot.zig").Snapshot;
-const SdlRuntime = @import("../platform/SdlRuntime.zig").SdlRuntime;
 const PlaybackSession = @import("../media/PlaybackSession.zig").PlaybackSession;
 const VideoFrame = @import("../video/VideoPipeline.zig").VideoPipeline.VideoFrame;
 
@@ -26,7 +25,6 @@ pub const PlaybackEngine = struct {
     snapshot: Snapshot = .{},
     session_mutex: std.Thread.Mutex = .{},
 
-    runtime: SdlRuntime = .{},
     session: PlaybackSession,
 
     pub fn init(allocator: std.mem.Allocator) Self {
@@ -44,9 +42,6 @@ pub const PlaybackEngine = struct {
         if (self.thread != null) {
             return error.AlreadyStarted;
         }
-
-        try self.runtime.init();
-        errdefer self.runtime.deinit();
 
         try self.session.start();
         errdefer self.session.stop();
@@ -70,7 +65,6 @@ pub const PlaybackEngine = struct {
         self.session_mutex.lock();
         self.session.stop();
         self.session_mutex.unlock();
-        self.runtime.deinit();
         self.resetSnapshot();
     }
 
@@ -250,4 +244,31 @@ test "engine start and scalar commands" {
     const snapshot = engine.getSnapshot();
     try std.testing.expect(snapshot.volume > 0.0);
     try std.testing.expect(snapshot.playback_speed >= 0.25);
+}
+
+test "engine does not own global sdl lifecycle" {
+    try std.testing.expect(!@hasField(PlaybackEngine, "runtime"));
+}
+
+test "engine command queue reports full when saturated" {
+    var engine = PlaybackEngine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    var i: usize = 0;
+    while (i < PlaybackEngine.queue_capacity) : (i += 1) {
+        try engine.sendPlay();
+    }
+
+    try std.testing.expectError(error.QueueFull, engine.sendPlay());
+}
+
+test "engine stop is idempotent before start" {
+    var engine = PlaybackEngine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    engine.stop();
+    engine.stop();
+
+    const snapshot = engine.getSnapshot();
+    try std.testing.expectEqual(.stopped, snapshot.state);
 }

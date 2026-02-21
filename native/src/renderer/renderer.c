@@ -214,126 +214,9 @@ static int recreate_video_resources(Renderer* ren, int width, int height) {
     return 0;
 }
 
-int renderer_init(Renderer* ren, App* app) {
-    memset(ren, 0, sizeof(Renderer));
-    ren->app = app;
-
-    ren->vert_module = create_shader_module_from_file(app->device, "src/shaders/video.vert.spv");
-    if (!ren->vert_module) {
-        return -1;
-    }
-
-    ren->frag_module = create_shader_module_from_file(app->device, "src/shaders/video.frag.spv");
-    if (!ren->frag_module) {
-        return -1;
-    }
-
-    VkDescriptorSetLayoutBinding sampler_binding = {
-        .binding = 0,
-        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = 1,
-        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-    };
-    VkDescriptorSetLayoutCreateInfo descriptor_layout_info = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1,
-        .pBindings = &sampler_binding,
-    };
-    if (vkCreateDescriptorSetLayout(app->device, &descriptor_layout_info, NULL, &ren->descriptor_layout) != VK_SUCCESS) {
-        return -1;
-    }
-
-    VkDescriptorPoolSize descriptor_pool_size = {
-        .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = VIDEO_UPLOAD_SLOTS,
-    };
-    VkDescriptorPoolCreateInfo descriptor_pool_info = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-        .poolSizeCount = 1,
-        .pPoolSizes = &descriptor_pool_size,
-        .maxSets = VIDEO_UPLOAD_SLOTS,
-    };
-    if (vkCreateDescriptorPool(app->device, &descriptor_pool_info, NULL, &ren->descriptor_pool) != VK_SUCCESS) {
-        return -1;
-    }
-
-    VkDescriptorSetLayout set_layouts[VIDEO_UPLOAD_SLOTS];
-    for (uint32_t i = 0; i < VIDEO_UPLOAD_SLOTS; i++) {
-        set_layouts[i] = ren->descriptor_layout;
-    }
-
-    VkDescriptorSetAllocateInfo descriptor_set_alloc_info = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool = ren->descriptor_pool,
-        .descriptorSetCount = VIDEO_UPLOAD_SLOTS,
-        .pSetLayouts = set_layouts,
-    };
-    VkDescriptorSet descriptor_sets[VIDEO_UPLOAD_SLOTS];
-    if (vkAllocateDescriptorSets(app->device, &descriptor_set_alloc_info, descriptor_sets) != VK_SUCCESS) {
-        return -1;
-    }
-
-    for (uint32_t i = 0; i < VIDEO_UPLOAD_SLOTS; i++) {
-        ren->video_slots[i].descriptor_set = descriptor_sets[i];
-    }
-
-    VkSamplerCreateInfo sampler_info = {
-        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .magFilter = VK_FILTER_LINEAR,
-        .minFilter = VK_FILTER_LINEAR,
-        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-        .maxLod = 1.0f,
-    };
-    if (vkCreateSampler(app->device, &sampler_info, NULL, &ren->video_sampler) != VK_SUCCESS) {
-        return -1;
-    }
-
-    VkCommandBufferAllocateInfo upload_alloc_info = {
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = app->command_pool,
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = VIDEO_UPLOAD_SLOTS,
-    };
-    VkCommandBuffer upload_cmds[VIDEO_UPLOAD_SLOTS];
-    if (vkAllocateCommandBuffers(app->device, &upload_alloc_info, upload_cmds) != VK_SUCCESS) {
-        return -1;
-    }
-
-    VkFenceCreateInfo upload_fence_info = {
-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
-    };
-    for (uint32_t i = 0; i < VIDEO_UPLOAD_SLOTS; i++) {
-        ren->video_slots[i].upload_cmd = upload_cmds[i];
-        if (vkCreateFence(app->device, &upload_fence_info, NULL, &ren->video_slots[i].upload_fence) != VK_SUCCESS) {
-            return -1;
-        }
-    }
-
-    float vertices[] = {
-        -1.0f, -1.0f, 0.0f, 1.0f,
-         1.0f, -1.0f, 1.0f, 1.0f,
-        -1.0f,  1.0f, 0.0f, 0.0f,
-         1.0f,  1.0f, 1.0f, 0.0f,
-    };
-    if (create_buffer(app, sizeof(vertices), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &ren->vertex_buffer, &ren->vertex_memory) != 0) {
-        return -1;
-    }
-
-    void* mapped;
-    vkMapMemory(app->device, ren->vertex_memory, 0, sizeof(vertices), 0, &mapped);
-    memcpy(mapped, vertices, sizeof(vertices));
-    vkUnmapMemory(app->device, ren->vertex_memory);
-
-    VkPipelineLayoutCreateInfo pipeline_layout_info = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 1,
-        .pSetLayouts = &ren->descriptor_layout,
-    };
-    if (vkCreatePipelineLayout(app->device, &pipeline_layout_info, NULL, &ren->pipeline_layout) != VK_SUCCESS) {
+static int create_graphics_pipeline(Renderer* ren) {
+    App* app = ren->app;
+    if (!app || !app->device || !app->render_pass || !ren->pipeline_layout || !ren->vert_module || !ren->frag_module) {
         return -1;
     }
 
@@ -424,12 +307,146 @@ int renderer_init(Renderer* ren, App* app) {
         return -1;
     }
 
+    return 0;
+}
+
+int renderer_init(Renderer* ren, App* app) {
+    memset(ren, 0, sizeof(Renderer));
+    ren->app = app;
+
+    ren->vert_module = create_shader_module_from_file(app->device, "src/shaders/video.vert.spv");
+    if (!ren->vert_module) {
+        goto fail;
+    }
+
+    ren->frag_module = create_shader_module_from_file(app->device, "src/shaders/video.frag.spv");
+    if (!ren->frag_module) {
+        goto fail;
+    }
+
+    VkDescriptorSetLayoutBinding sampler_binding = {
+        .binding = 0,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+    };
+    VkDescriptorSetLayoutCreateInfo descriptor_layout_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings = &sampler_binding,
+    };
+    if (vkCreateDescriptorSetLayout(app->device, &descriptor_layout_info, NULL, &ren->descriptor_layout) != VK_SUCCESS) {
+        goto fail;
+    }
+
+    VkDescriptorPoolSize descriptor_pool_size = {
+        .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorCount = VIDEO_UPLOAD_SLOTS,
+    };
+    VkDescriptorPoolCreateInfo descriptor_pool_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .poolSizeCount = 1,
+        .pPoolSizes = &descriptor_pool_size,
+        .maxSets = VIDEO_UPLOAD_SLOTS,
+    };
+    if (vkCreateDescriptorPool(app->device, &descriptor_pool_info, NULL, &ren->descriptor_pool) != VK_SUCCESS) {
+        goto fail;
+    }
+
+    VkDescriptorSetLayout set_layouts[VIDEO_UPLOAD_SLOTS];
+    for (uint32_t i = 0; i < VIDEO_UPLOAD_SLOTS; i++) {
+        set_layouts[i] = ren->descriptor_layout;
+    }
+
+    VkDescriptorSetAllocateInfo descriptor_set_alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = ren->descriptor_pool,
+        .descriptorSetCount = VIDEO_UPLOAD_SLOTS,
+        .pSetLayouts = set_layouts,
+    };
+    VkDescriptorSet descriptor_sets[VIDEO_UPLOAD_SLOTS];
+    if (vkAllocateDescriptorSets(app->device, &descriptor_set_alloc_info, descriptor_sets) != VK_SUCCESS) {
+        goto fail;
+    }
+
+    for (uint32_t i = 0; i < VIDEO_UPLOAD_SLOTS; i++) {
+        ren->video_slots[i].descriptor_set = descriptor_sets[i];
+    }
+
+    VkSamplerCreateInfo sampler_info = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_LINEAR,
+        .minFilter = VK_FILTER_LINEAR,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .maxLod = 1.0f,
+    };
+    if (vkCreateSampler(app->device, &sampler_info, NULL, &ren->video_sampler) != VK_SUCCESS) {
+        goto fail;
+    }
+
+    VkCommandBufferAllocateInfo upload_alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = app->command_pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = VIDEO_UPLOAD_SLOTS,
+    };
+    VkCommandBuffer upload_cmds[VIDEO_UPLOAD_SLOTS];
+    if (vkAllocateCommandBuffers(app->device, &upload_alloc_info, upload_cmds) != VK_SUCCESS) {
+        goto fail;
+    }
+
+    VkFenceCreateInfo upload_fence_info = {
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+    };
+    for (uint32_t i = 0; i < VIDEO_UPLOAD_SLOTS; i++) {
+        ren->video_slots[i].upload_cmd = upload_cmds[i];
+        if (vkCreateFence(app->device, &upload_fence_info, NULL, &ren->video_slots[i].upload_fence) != VK_SUCCESS) {
+            goto fail;
+        }
+    }
+
+    float vertices[] = {
+        -1.0f, -1.0f, 0.0f, 1.0f,
+         1.0f, -1.0f, 1.0f, 1.0f,
+        -1.0f,  1.0f, 0.0f, 0.0f,
+         1.0f,  1.0f, 1.0f, 0.0f,
+    };
+    if (create_buffer(app, sizeof(vertices), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &ren->vertex_buffer, &ren->vertex_memory) != 0) {
+        goto fail;
+    }
+
+    void* mapped;
+    vkMapMemory(app->device, ren->vertex_memory, 0, sizeof(vertices), 0, &mapped);
+    memcpy(mapped, vertices, sizeof(vertices));
+    vkUnmapMemory(app->device, ren->vertex_memory);
+
+    VkPipelineLayoutCreateInfo pipeline_layout_info = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts = &ren->descriptor_layout,
+    };
+    if (vkCreatePipelineLayout(app->device, &pipeline_layout_info, NULL, &ren->pipeline_layout) != VK_SUCCESS) {
+        goto fail;
+    }
+
+    if (create_graphics_pipeline(ren) != 0) {
+        goto fail;
+    }
+
     ren->active_slot = 0;
     ren->next_slot = 0;
     ren->has_video = 0;
     ren->video_width = 0;
     ren->video_height = 0;
     return 0;
+
+fail:
+    renderer_destroy(ren);
+    return -1;
 }
 
 void renderer_destroy(Renderer* ren) {
@@ -486,6 +503,19 @@ void renderer_destroy(Renderer* ren) {
         vkFreeMemory(app->device, ren->vertex_memory, NULL);
         ren->vertex_memory = VK_NULL_HANDLE;
     }
+}
+
+int renderer_recreate_for_swapchain(Renderer* ren) {
+    if (!ren || !ren->app || !ren->app->device) {
+        return -1;
+    }
+
+    if (ren->pipeline) {
+        vkDestroyPipeline(ren->app->device, ren->pipeline, NULL);
+        ren->pipeline = VK_NULL_HANDLE;
+    }
+
+    return create_graphics_pipeline(ren);
 }
 
 int renderer_upload_video(Renderer* ren, uint8_t* data, int width, int height, int linesize) {

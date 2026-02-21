@@ -37,6 +37,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const fetch_third_party_cmd = b.addSystemCommand(&.{ "zig", "run", "scripts/fetch_third_party.zig", "--" });
+    const fetch_third_party_step = b.step("fetch-third-party", "Fetch third-party dependencies for development");
+    fetch_third_party_step.dependOn(&fetch_third_party_cmd.step);
+
     const compile_shader_step = b.step("compile-shaders", "Compile Vulkan shaders to SPIR-V");
 
     const vert_spv = b.addSystemCommand(&.{ "glslc", "-o", "src/shaders/video.vert.spv", "src/shaders/video.vert" });
@@ -67,6 +71,7 @@ pub fn build(b: *std.Build) void {
 
     if (b.args) |args| {
         run_cmd.addArgs(args);
+        fetch_third_party_cmd.addArgs(args);
     }
 
     const unit_tests = b.addTest(.{

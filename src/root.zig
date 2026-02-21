@@ -6,5 +6,6 @@ pub const AudioOutput = @import("audio/AudioOutput.zig").AudioOutput;
 pub const VideoPipeline = @import("video/VideoPipeline.zig").VideoPipeline;
 
 test {
+    _ = @import("app/App.zig");
     _ = @import("engine/PlaybackEngine.zig");
 }

@@ -51,6 +51,7 @@ Synchronization:
 - Zig engine queue: mutex + condition variable.
 - Zig session/snapshot: dedicated mutexes.
 - Native demux/audio/video pipelines: internal SDL mutex/condition primitives.
+- Render-side frame fetch uses non-blocking `tryLock` on session mutex to avoid UI stalls under engine contention.
 
 ## Swapchain Recreate Flow
 

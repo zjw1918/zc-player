@@ -107,7 +107,9 @@ pub const PlaybackEngine = struct {
     }
 
     pub fn getFrameForRender(self: *Self, master_clock: f64) ?VideoFrame {
-        self.session_mutex.lock();
+        if (!self.session_mutex.tryLock()) {
+            return null;
+        }
         defer self.session_mutex.unlock();
         return self.session.getFrameForRender(master_clock);
     }
@@ -271,4 +273,14 @@ test "engine stop is idempotent before start" {
 
     const snapshot = engine.getSnapshot();
     try std.testing.expectEqual(.stopped, snapshot.state);
+}
+
+test "getFrameForRender does not block when session mutex is held" {
+    var engine = PlaybackEngine.init(std.testing.allocator);
+    defer engine.deinit();
+
+    engine.session_mutex.lock();
+    defer engine.session_mutex.unlock();
+
+    try std.testing.expect(engine.getFrameForRender(0.0) == null);
 }

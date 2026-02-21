@@ -25,9 +25,12 @@ static int check_validation_layer_support() {
                 break;
             }
         }
-        free(available_layers);
-        if (!layer_found) return 0;
+        if (!layer_found) {
+            free(available_layers);
+            return 0;
+        }
     }
+    free(available_layers);
     return 1;
 }
 
@@ -271,17 +274,38 @@ static int create_logical_device(App* app) {
 
 static int create_swapchain(App* app) {
     VkSurfaceCapabilitiesKHR capabilities;
-    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(app->gpu, app->surface, &capabilities);
+    if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(app->gpu, app->surface, &capabilities) != VK_SUCCESS) {
+        return -1;
+    }
 
     uint32_t format_count;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(app->gpu, app->surface, &format_count, NULL);
+    if (vkGetPhysicalDeviceSurfaceFormatsKHR(app->gpu, app->surface, &format_count, NULL) != VK_SUCCESS || format_count == 0) {
+        return -1;
+    }
     VkSurfaceFormatKHR* formats = malloc(format_count * sizeof(VkSurfaceFormatKHR));
-    vkGetPhysicalDeviceSurfaceFormatsKHR(app->gpu, app->surface, &format_count, formats);
+    if (!formats) {
+        return -1;
+    }
+    if (vkGetPhysicalDeviceSurfaceFormatsKHR(app->gpu, app->surface, &format_count, formats) != VK_SUCCESS) {
+        free(formats);
+        return -1;
+    }
 
     uint32_t present_mode_count;
-    vkGetPhysicalDeviceSurfacePresentModesKHR(app->gpu, app->surface, &present_mode_count, NULL);
+    if (vkGetPhysicalDeviceSurfacePresentModesKHR(app->gpu, app->surface, &present_mode_count, NULL) != VK_SUCCESS || present_mode_count == 0) {
+        free(formats);
+        return -1;
+    }
     VkPresentModeKHR* present_modes = malloc(present_mode_count * sizeof(VkPresentModeKHR));
-    vkGetPhysicalDeviceSurfacePresentModesKHR(app->gpu, app->surface, &present_mode_count, present_modes);
+    if (!present_modes) {
+        free(formats);
+        return -1;
+    }
+    if (vkGetPhysicalDeviceSurfacePresentModesKHR(app->gpu, app->surface, &present_mode_count, present_modes) != VK_SUCCESS) {
+        free(formats);
+        free(present_modes);
+        return -1;
+    }
 
     VkSurfaceFormatKHR surface_format = formats[0];
     for (uint32_t i = 0; i < format_count; i++) {
@@ -359,12 +383,43 @@ static int create_swapchain(App* app) {
     app->swapchain_extent = extent;
 
     uint32_t actual_image_count;
-    vkGetSwapchainImagesKHR(app->device, app->swapchain, &actual_image_count, NULL);
-    app->swapchain_images = malloc(actual_image_count * sizeof(VkImage));
-    vkGetSwapchainImagesKHR(app->device, app->swapchain, &actual_image_count, app->swapchain_images);
+    if (vkGetSwapchainImagesKHR(app->device, app->swapchain, &actual_image_count, NULL) != VK_SUCCESS || actual_image_count == 0) {
+        vkDestroySwapchainKHR(app->device, app->swapchain, NULL);
+        app->swapchain = VK_NULL_HANDLE;
+        free(formats);
+        free(present_modes);
+        return -1;
+    }
+    app->swapchain_images = calloc(actual_image_count, sizeof(VkImage));
+    if (!app->swapchain_images) {
+        vkDestroySwapchainKHR(app->device, app->swapchain, NULL);
+        app->swapchain = VK_NULL_HANDLE;
+        free(formats);
+        free(present_modes);
+        return -1;
+    }
+    if (vkGetSwapchainImagesKHR(app->device, app->swapchain, &actual_image_count, app->swapchain_images) != VK_SUCCESS) {
+        free(app->swapchain_images);
+        app->swapchain_images = NULL;
+        vkDestroySwapchainKHR(app->device, app->swapchain, NULL);
+        app->swapchain = VK_NULL_HANDLE;
+        free(formats);
+        free(present_modes);
+        return -1;
+    }
     app->swapchain_image_count = actual_image_count;
 
-    app->swapchain_image_views = malloc(actual_image_count * sizeof(VkImageView));
+    app->swapchain_image_views = calloc(actual_image_count, sizeof(VkImageView));
+    if (!app->swapchain_image_views) {
+        free(app->swapchain_images);
+        app->swapchain_images = NULL;
+        vkDestroySwapchainKHR(app->device, app->swapchain, NULL);
+        app->swapchain = VK_NULL_HANDLE;
+        app->swapchain_image_count = 0;
+        free(formats);
+        free(present_modes);
+        return -1;
+    }
     for (uint32_t i = 0; i < actual_image_count; i++) {
         VkImageViewCreateInfo create_info = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -379,7 +434,23 @@ static int create_swapchain(App* app) {
                 .layerCount = 1,
             },
         };
-        vkCreateImageView(app->device, &create_info, NULL, &app->swapchain_image_views[i]);
+        if (vkCreateImageView(app->device, &create_info, NULL, &app->swapchain_image_views[i]) != VK_SUCCESS) {
+            for (uint32_t j = 0; j < i; j++) {
+                if (app->swapchain_image_views[j] != VK_NULL_HANDLE) {
+                    vkDestroyImageView(app->device, app->swapchain_image_views[j], NULL);
+                }
+            }
+            free(app->swapchain_image_views);
+            app->swapchain_image_views = NULL;
+            free(app->swapchain_images);
+            app->swapchain_images = NULL;
+            vkDestroySwapchainKHR(app->device, app->swapchain, NULL);
+            app->swapchain = VK_NULL_HANDLE;
+            app->swapchain_image_count = 0;
+            free(formats);
+            free(present_modes);
+            return -1;
+        }
     }
 
     free(formats);
@@ -436,7 +507,10 @@ static int create_render_pass(App* app) {
 }
 
 static int create_framebuffers(App* app) {
-    app->framebuffers = malloc(app->swapchain_image_count * sizeof(VkFramebuffer));
+    app->framebuffers = calloc(app->swapchain_image_count, sizeof(VkFramebuffer));
+    if (!app->framebuffers) {
+        return -1;
+    }
 
     for (uint32_t i = 0; i < app->swapchain_image_count; i++) {
         VkImageView attachments[] = { app->swapchain_image_views[i] };
@@ -452,6 +526,13 @@ static int create_framebuffers(App* app) {
         };
 
         if (vkCreateFramebuffer(app->device, &framebuffer_info, NULL, &app->framebuffers[i]) != VK_SUCCESS) {
+            for (uint32_t j = 0; j < i; j++) {
+                if (app->framebuffers[j] != VK_NULL_HANDLE) {
+                    vkDestroyFramebuffer(app->device, app->framebuffers[j], NULL);
+                }
+            }
+            free(app->framebuffers);
+            app->framebuffers = NULL;
             return -1;
         }
     }
@@ -472,7 +553,10 @@ static int create_command_pool(App* app) {
 }
 
 static int create_command_buffers(App* app) {
-    app->command_buffers = malloc(app->swapchain_image_count * sizeof(VkCommandBuffer));
+    app->command_buffers = calloc(app->swapchain_image_count, sizeof(VkCommandBuffer));
+    if (!app->command_buffers) {
+        return -1;
+    }
 
     VkCommandBufferAllocateInfo alloc_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -482,15 +566,26 @@ static int create_command_buffers(App* app) {
     };
 
     if (vkAllocateCommandBuffers(app->device, &alloc_info, app->command_buffers) != VK_SUCCESS) {
+        free(app->command_buffers);
+        app->command_buffers = NULL;
         return -1;
     }
     return 0;
 }
 
 static int create_sync_objects(App* app) {
-    app->image_available_semaphores = malloc(app->swapchain_image_count * sizeof(VkSemaphore));
-    app->render_finished_semaphores = malloc(app->swapchain_image_count * sizeof(VkSemaphore));
-    app->in_flight_fences = malloc(app->swapchain_image_count * sizeof(VkFence));
+    app->image_available_semaphores = calloc(app->swapchain_image_count, sizeof(VkSemaphore));
+    app->render_finished_semaphores = calloc(app->swapchain_image_count, sizeof(VkSemaphore));
+    app->in_flight_fences = calloc(app->swapchain_image_count, sizeof(VkFence));
+    if (!app->image_available_semaphores || !app->render_finished_semaphores || !app->in_flight_fences) {
+        free(app->image_available_semaphores);
+        free(app->render_finished_semaphores);
+        free(app->in_flight_fences);
+        app->image_available_semaphores = NULL;
+        app->render_finished_semaphores = NULL;
+        app->in_flight_fences = NULL;
+        return -1;
+    }
 
     VkSemaphoreCreateInfo semaphore_info = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
@@ -505,6 +600,23 @@ static int create_sync_objects(App* app) {
         if (vkCreateSemaphore(app->device, &semaphore_info, NULL, &app->image_available_semaphores[i]) != VK_SUCCESS ||
             vkCreateSemaphore(app->device, &semaphore_info, NULL, &app->render_finished_semaphores[i]) != VK_SUCCESS ||
             vkCreateFence(app->device, &fence_info, NULL, &app->in_flight_fences[i]) != VK_SUCCESS) {
+            for (uint32_t j = 0; j <= i; j++) {
+                if (app->image_available_semaphores[j] != VK_NULL_HANDLE) {
+                    vkDestroySemaphore(app->device, app->image_available_semaphores[j], NULL);
+                }
+                if (app->render_finished_semaphores[j] != VK_NULL_HANDLE) {
+                    vkDestroySemaphore(app->device, app->render_finished_semaphores[j], NULL);
+                }
+                if (app->in_flight_fences[j] != VK_NULL_HANDLE) {
+                    vkDestroyFence(app->device, app->in_flight_fences[j], NULL);
+                }
+            }
+            free(app->image_available_semaphores);
+            free(app->render_finished_semaphores);
+            free(app->in_flight_fences);
+            app->image_available_semaphores = NULL;
+            app->render_finished_semaphores = NULL;
+            app->in_flight_fences = NULL;
             return -1;
         }
     }

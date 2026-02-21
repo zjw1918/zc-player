@@ -15,6 +15,9 @@ static int check_validation_layer_support() {
     uint32_t layer_count;
     vkEnumerateInstanceLayerProperties(&layer_count, NULL);
     VkLayerProperties* available_layers = malloc(layer_count * sizeof(VkLayerProperties));
+    if (layer_count > 0 && !available_layers) {
+        return 0;
+    }
     vkEnumerateInstanceLayerProperties(&layer_count, available_layers);
 
     for (int i = 0; i < sizeof(required_validation_layers)/sizeof(required_validation_layers[0]); i++) {
@@ -162,6 +165,13 @@ static int create_instance(App* app) {
 
     uint32_t sdl_ext_count = 0;
     const char* const* sdl_extensions = SDL_Vulkan_GetInstanceExtensions(&sdl_ext_count);
+    int has_portability_enumeration = 0;
+    for (uint32_t i = 0; i < sdl_ext_count; i++) {
+        if (strcmp(sdl_extensions[i], "VK_KHR_portability_enumeration") == 0) {
+            has_portability_enumeration = 1;
+            break;
+        }
+    }
 
     int validation_enabled = check_validation_layer_support();
     printf("Validation layers supported: %d\n", validation_enabled);
@@ -173,7 +183,7 @@ static int create_instance(App* app) {
         .ppEnabledExtensionNames = sdl_extensions,
         .enabledLayerCount = validation_enabled ? 1 : 0,
         .ppEnabledLayerNames = validation_enabled ? required_validation_layers : NULL,
-        .flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
+        .flags = has_portability_enumeration ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0,
     };
 
     VkResult result = vkCreateInstance(&create_info, NULL, &app->instance);
@@ -689,6 +699,7 @@ static void destroy_swapchain_resources(App* app) {
 
 static int recreate_swapchain(App* app) {
     if (!app || !app->device) {
+        fprintf(stderr, "recreate_swapchain: invalid app/device\n");
         return -1;
     }
 
@@ -707,18 +718,23 @@ static int recreate_swapchain(App* app) {
     }
 
     if (create_swapchain(app) != 0) {
+        fprintf(stderr, "recreate_swapchain: create_swapchain failed\n");
         return -1;
     }
     if (create_render_pass(app) != 0) {
+        fprintf(stderr, "recreate_swapchain: create_render_pass failed\n");
         return -1;
     }
     if (create_framebuffers(app) != 0) {
+        fprintf(stderr, "recreate_swapchain: create_framebuffers failed\n");
         return -1;
     }
     if (create_command_buffers(app) != 0) {
+        fprintf(stderr, "recreate_swapchain: create_command_buffers failed\n");
         return -1;
     }
     if (create_sync_objects(app) != 0) {
+        fprintf(stderr, "recreate_swapchain: create_sync_objects failed\n");
         return -1;
     }
 
@@ -872,6 +888,9 @@ void app_present(App* app) {
     if (app->swapchain_needs_recreate) {
         int recreate_result = recreate_swapchain(app);
         if (recreate_result != 0) {
+            if (recreate_result < 0) {
+                fprintf(stderr, "app_present: swapchain recreation failed\n");
+            }
             return;
         }
     }
@@ -880,7 +899,10 @@ void app_present(App* app) {
         return;
     }
 
-    vkWaitForFences(app->device, 1, &app->in_flight_fences[app->current_frame], VK_TRUE, UINT64_MAX);
+    if (vkWaitForFences(app->device, 1, &app->in_flight_fences[app->current_frame], VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+        fprintf(stderr, "vkWaitForFences failed\n");
+        return;
+    }
 
     uint32_t image_index;
     VkResult result = vkAcquireNextImageKHR(app->device, app->swapchain, UINT64_MAX,
@@ -896,9 +918,15 @@ void app_present(App* app) {
         return;
     }
 
-    vkResetCommandBuffer(app->command_buffers[app->current_frame], 0);
+    if (vkResetCommandBuffer(app->command_buffers[app->current_frame], 0) != VK_SUCCESS) {
+        fprintf(stderr, "vkResetCommandBuffer failed\n");
+        return;
+    }
     VkCommandBufferBeginInfo begin_info = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    vkBeginCommandBuffer(app->command_buffers[app->current_frame], &begin_info);
+    if (vkBeginCommandBuffer(app->command_buffers[app->current_frame], &begin_info) != VK_SUCCESS) {
+        fprintf(stderr, "vkBeginCommandBuffer failed\n");
+        return;
+    }
 
     VkRenderPassBeginInfo render_pass_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -941,8 +969,14 @@ void app_present(App* app) {
     submit_info.signalSemaphoreCount = 1;
     submit_info.pSignalSemaphores = signal_semaphores;
 
-    vkResetFences(app->device, 1, &app->in_flight_fences[app->current_frame]);
-    vkQueueSubmit(app->graphics_queue, 1, &submit_info, app->in_flight_fences[app->current_frame]);
+    if (vkResetFences(app->device, 1, &app->in_flight_fences[app->current_frame]) != VK_SUCCESS) {
+        fprintf(stderr, "vkResetFences failed\n");
+        return;
+    }
+    if (vkQueueSubmit(app->graphics_queue, 1, &submit_info, app->in_flight_fences[app->current_frame]) != VK_SUCCESS) {
+        fprintf(stderr, "vkQueueSubmit failed\n");
+        return;
+    }
 
     VkPresentInfoKHR present_info = {};
     present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;

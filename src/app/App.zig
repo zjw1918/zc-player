@@ -183,3 +183,18 @@ pub const App = struct {
         }
     }
 };
+
+test "swapchain recreate callback stops app on renderer recreate failure" {
+    var app: gui.App = std.mem.zeroes(gui.App);
+    app.running = 1;
+
+    var renderer: gui.Renderer = std.mem.zeroes(gui.Renderer);
+    renderer.app = &app;
+
+    swapchainRecreatedCallback(&renderer);
+    try std.testing.expect(app.running == 0);
+}
+
+test "swapchain recreate callback handles null userdata" {
+    swapchainRecreatedCallback(null);
+}

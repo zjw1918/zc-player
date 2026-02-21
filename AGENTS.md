@@ -16,7 +16,6 @@ Guidance for coding agents working in this repository.
 - `src/audio/`, `src/video/` media output/pipeline wrappers.
 - `src/ffi/` Zig-to-C imports and boundary modules.
 - `native/src/` active native code.
-- `native/archive-c/` legacy media backend when `-Dmedia_impl=c`.
 - `src/shaders/` GLSL + generated SPIR-V.
 
 ## Prerequisites
@@ -28,11 +27,8 @@ Guidance for coding agents working in this repository.
 ## Build / Run Commands
 - Build app: `zig build`
 - Build release-fast: `zig build -Doptimize=ReleaseFast`
-- Build with Zig media backend: `zig build -Dmedia_impl=zig`
-- Build with C media backend (default): `zig build -Dmedia_impl=c`
 - Run app: `zig build run`
 - Run app with media file: `zig build run -- /path/to/media.mp4`
-- Run app with Zig media backend: `zig build run -Dmedia_impl=zig -- /path/to/media.mp4`
 
 ## Shader Commands
 - Explicit shader compile step: `zig build compile-shaders`
@@ -40,14 +36,11 @@ Guidance for coding agents working in this repository.
 
 ## Test Commands
 - Run full suite: `zig build test`
-- Run tests with Zig media backend: `zig build test -Dmedia_impl=zig`
 - Run tests release-fast: `zig build test -Doptimize=ReleaseFast`
 
 ## Running a Single Test
 - Preferred via build system:
   - `zig build test -- --test-filter "engine start and scalar commands"`
-- Single test + explicit backend:
-  - `zig build test -Dmedia_impl=zig -- --test-filter "engine start and scalar commands"`
 - Direct Zig test (use only when build-step parity is not needed):
   - `zig test src/engine/PlaybackEngine.zig`
 

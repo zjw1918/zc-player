@@ -1,6 +1,6 @@
 const std = @import("std");
 
-fn configureNativeDeps(b: *std.Build, step: *std.Build.Step.Compile, use_zig_media: bool) void {
+fn configureNativeDeps(b: *std.Build, step: *std.Build.Step.Compile) void {
     step.addIncludePath(b.path("native/src"));
     step.addIncludePath(b.path("native/src/player"));
     step.addIncludePath(b.path("native/src/video"));
@@ -8,19 +8,6 @@ fn configureNativeDeps(b: *std.Build, step: *std.Build.Step.Compile, use_zig_med
     step.addIncludePath(b.path("third_party/imgui"));
     step.addIncludePath(b.path("third_party/imgui/backends"));
     step.addSystemIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
-
-    if (!use_zig_media) {
-        step.addCSourceFiles(.{
-            .files = &.{
-                "native/archive-c/player/player.c",
-                "native/archive-c/player/demuxer.c",
-                "native/archive-c/video/video_decoder.c",
-                "native/archive-c/video/video_pipeline.c",
-                "native/archive-c/audio/audio_decoder.c",
-                "native/archive-c/audio/audio_output.c",
-            },
-        });
-    }
 
     step.addCSourceFiles(.{
         .files = &.{
@@ -49,15 +36,6 @@ fn configureNativeDeps(b: *std.Build, step: *std.Build.Step.Compile, use_zig_med
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const media_impl = b.option([]const u8, "media_impl", "Media implementation: c or zig") orelse "c";
-    const use_zig_media = blk: {
-        if (std.mem.eql(u8, media_impl, "zig")) break :blk true;
-        if (std.mem.eql(u8, media_impl, "c")) break :blk false;
-        std.debug.panic("invalid -Dmedia_impl value: {s} (expected c or zig)", .{media_impl});
-    };
-
-    const options = b.addOptions();
-    options.addOption(bool, "media_impl_zig", use_zig_media);
 
     const compile_shader_step = b.step("compile-shaders", "Compile Vulkan shaders to SPIR-V");
 
@@ -75,8 +53,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    exe.root_module.addOptions("build_options", options);
-    configureNativeDeps(b, exe, use_zig_media);
+    configureNativeDeps(b, exe);
     exe.step.dependOn(&vert_spv.step);
     exe.step.dependOn(&frag_spv.step);
 
@@ -99,8 +76,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    unit_tests.root_module.addOptions("build_options", options);
-    configureNativeDeps(b, unit_tests, use_zig_media);
+    configureNativeDeps(b, unit_tests);
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
 

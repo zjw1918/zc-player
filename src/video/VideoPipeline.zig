@@ -1,5 +1,6 @@
 const c = @import("../ffi/cplayer.zig").c;
 const Player = @import("../media/Player.zig").Player;
+const VideoInterop = @import("interop/VideoInterop.zig").VideoInterop;
 
 pub const VideoPipeline = struct {
     pub const FrameFormat = enum(c_int) {
@@ -19,12 +20,14 @@ pub const VideoPipeline = struct {
 
     handle: c.VideoPipeline = undefined,
     initialized: bool = false,
+    interop: ?VideoInterop = null,
 
     pub fn init(self: *VideoPipeline, player: *Player) !void {
         if (c.video_pipeline_init(&self.handle, player.raw()) != 0) {
             return error.InitFailed;
         }
         self.initialized = true;
+        self.interop = VideoInterop.init(.auto);
     }
 
     pub fn start(self: *VideoPipeline) !void {
@@ -41,6 +44,10 @@ pub const VideoPipeline = struct {
             return;
         }
         c.video_pipeline_destroy(&self.handle);
+        if (self.interop) |*interop| {
+            interop.deinit();
+        }
+        self.interop = null;
         self.initialized = false;
     }
 

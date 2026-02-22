@@ -8,4 +8,6 @@ pub const VideoPipeline = @import("video/VideoPipeline.zig").VideoPipeline;
 test {
     _ = @import("app/App.zig");
     _ = @import("engine/PlaybackEngine.zig");
+    _ = @import("video/interop/VideoInterop.zig");
+    _ = @import("video/interop/SoftwareUploadBackend.zig");
 }

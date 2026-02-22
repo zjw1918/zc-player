@@ -7,14 +7,30 @@ const c = @cImport({
 
 const PLAYING_STATE = switch (@typeInfo(c.PlayerState)) {
     .@"enum" => @as(c.PlayerState, @enumFromInt(c.PLAYER_STATE_PLAYING)),
-    else => @as(c.PlayerState, @intCast(c.PLAYER_STATE_PLAYING))
+    else => @as(c.PlayerState, @intCast(c.PLAYER_STATE_PLAYING)),
 };
 
 fn frameCapacity() c_int {
     return c.VIDEO_FRAME_QUEUE_CAPACITY;
 }
 
-fn queuePushLocked(pipeline: *c.VideoPipeline, src_data: [*c]u8, src_linesize: c_int, width: c_int, height: c_int, pts: f64) c_int {
+fn planeCountForFormat(format: c_int) c_int {
+    return switch (format) {
+        c.VIDEO_FRAME_FORMAT_YUV420P => 3,
+        c.VIDEO_FRAME_FORMAT_NV12 => 2,
+        else => 1,
+    };
+}
+
+fn queuePushLocked(
+    pipeline: *c.VideoPipeline,
+    src_data: [*c]u8,
+    src_linesize: c_int,
+    width: c_int,
+    height: c_int,
+    format: c_int,
+    pts: f64,
+) c_int {
     if (pipeline.count >= frameCapacity()) {
         return -1;
     }
@@ -27,18 +43,18 @@ fn queuePushLocked(pipeline: *c.VideoPipeline, src_data: [*c]u8, src_linesize: c
     const tail_idx: usize = @intCast(pipeline.tail);
     const frame = &pipeline.frames[tail_idx];
 
-    if (frame.width != width or frame.height != height or frame.linesize < @as(c_int, @intCast(row_size))) {
+    if (frame.width != width or frame.height != height or frame.linesizes[0] < @as(c_int, @intCast(row_size))) {
         return -1;
     }
 
-    if (frame.data == null or src_data == null) {
+    if (frame.planes[0] == null or src_data == null) {
         return -1;
     }
 
-    const dst_base: [*]u8 = @ptrCast(frame.data);
+    const dst_base: [*]u8 = @ptrCast(frame.planes[0]);
     const src_base: [*]const u8 = @ptrCast(src_data);
     const src_stride: usize = @intCast(src_linesize);
-    const dst_stride: usize = @intCast(frame.linesize);
+    const dst_stride: usize = @intCast(frame.linesizes[0]);
 
     var y: c_int = 0;
     while (y < height) : (y += 1) {
@@ -48,6 +64,8 @@ fn queuePushLocked(pipeline: *c.VideoPipeline, src_data: [*c]u8, src_linesize: c
         std.mem.copyForwards(u8, dst_base[dst_off .. dst_off + row_size], src_base[src_off .. src_off + row_size]);
     }
 
+    frame.format = format;
+    frame.plane_count = planeCountForFormat(format);
     frame.pts = pts;
     pipeline.tail = @mod(pipeline.tail + 1, frameCapacity());
     pipeline.count += 1;
@@ -62,22 +80,24 @@ fn queuePopToUploadLocked(pipeline: *c.VideoPipeline) c_int {
     const head_idx: usize = @intCast(pipeline.head);
     const frame = &pipeline.frames[head_idx];
 
-    if (frame.data == null or pipeline.upload_buffer == null) {
+    if (frame.planes[0] == null or pipeline.upload_planes[0] == null) {
         return -1;
     }
 
-    const frame_size: usize = @as(usize, @intCast(frame.linesize)) * @as(usize, @intCast(frame.height));
-    if (pipeline.upload_buffer_size < frame_size) {
+    const frame_size: usize = @as(usize, @intCast(frame.linesizes[0])) * @as(usize, @intCast(frame.height));
+    if (pipeline.upload_plane_sizes[0] < frame_size) {
         return -1;
     }
 
-    const dst: [*]u8 = @ptrCast(pipeline.upload_buffer);
-    const src: [*]const u8 = @ptrCast(frame.data);
-    std.mem.copyForwards(u8, dst[0..frame_size], src[0..frame_size]);
+    const old_upload = pipeline.upload_planes[0];
+    pipeline.upload_planes[0] = frame.planes[0];
+    frame.planes[0] = old_upload;
 
     pipeline.pending_width = frame.width;
     pipeline.pending_height = frame.height;
-    pipeline.pending_linesize = frame.linesize;
+    pipeline.pending_linesizes[0] = frame.linesizes[0];
+    pipeline.pending_plane_count = frame.plane_count;
+    pipeline.pending_format = frame.format;
     pipeline.pending_pts = frame.pts;
     pipeline.have_pending_upload = 1;
 
@@ -153,7 +173,7 @@ fn decodeThreadMain(userdata: ?*anyopaque) callconv(.c) c_int {
             }
 
             const adjusted_pts = pts - pipeline.pts_offset;
-            if (queuePushLocked(pipeline, data, linesize, pipeline.player.*.width, pipeline.player.*.height, adjusted_pts) != 0) {
+            if (queuePushLocked(pipeline, data, linesize, pipeline.player.*.width, pipeline.player.*.height, c.VIDEO_FRAME_FORMAT_RGBA, adjusted_pts) != 0) {
                 _ = c.SDL_UnlockMutex(pipeline.queue_mutex);
                 c.SDL_Delay(1);
                 continue;
@@ -208,25 +228,28 @@ pub export fn video_pipeline_init(pipeline: ?*c.VideoPipeline, player: ?*c.Playe
     var i: c_int = 0;
     while (i < frameCapacity()) : (i += 1) {
         const idx: usize = @intCast(i);
-        p.frames[idx].data = @ptrCast(c.malloc(frame_size));
-        if (p.frames[idx].data == null) {
+        p.frames[idx].planes[0] = @ptrCast(c.malloc(frame_size));
+        if (p.frames[idx].planes[0] == null) {
             video_pipeline_destroy(p);
             return -1;
         }
 
+        p.frames[idx].plane_count = 1;
+        p.frames[idx].format = c.VIDEO_FRAME_FORMAT_RGBA;
         p.frames[idx].width = width;
         p.frames[idx].height = height;
-        p.frames[idx].linesize = linesize;
+        p.frames[idx].linesizes[0] = linesize;
         p.frames[idx].pts = 0.0;
     }
 
-    p.upload_buffer = @ptrCast(c.malloc(frame_size));
-    if (p.upload_buffer == null) {
+    p.upload_planes[0] = @ptrCast(c.malloc(frame_size));
+    if (p.upload_planes[0] == null) {
         video_pipeline_destroy(p);
         return -1;
     }
 
-    p.upload_buffer_size = frame_size;
+    p.upload_plane_sizes[0] = frame_size;
+    p.upload_plane_count = 1;
     return 0;
 }
 
@@ -287,7 +310,9 @@ pub export fn video_pipeline_reset(pipeline: ?*c.VideoPipeline) void {
     p.have_pending_upload = 0;
     p.pending_width = 0;
     p.pending_height = 0;
-    p.pending_linesize = 0;
+    p.pending_linesizes[0] = 0;
+    p.pending_plane_count = 0;
+    p.pending_format = c.VIDEO_FRAME_FORMAT_RGBA;
     p.pending_pts = 0.0;
     p.clock_base_pts = -1.0;
     p.clock_base_time_ns = 0;
@@ -309,18 +334,18 @@ pub export fn video_pipeline_destroy(pipeline: ?*c.VideoPipeline) void {
 
     video_pipeline_stop(p);
 
-    if (p.upload_buffer != null) {
-        c.free(p.upload_buffer);
-        p.upload_buffer = null;
-        p.upload_buffer_size = 0;
+    if (p.upload_planes[0] != null) {
+        c.free(p.upload_planes[0]);
+        p.upload_planes[0] = null;
+        p.upload_plane_sizes[0] = 0;
     }
 
     var i: c_int = 0;
     while (i < frameCapacity()) : (i += 1) {
         const idx: usize = @intCast(i);
-        if (p.frames[idx].data != null) {
-            c.free(p.frames[idx].data);
-            p.frames[idx].data = null;
+        if (p.frames[idx].planes[0] != null) {
+            c.free(p.frames[idx].planes[0]);
+            p.frames[idx].planes[0] = null;
         }
     }
 
@@ -381,13 +406,52 @@ pub export fn video_pipeline_get_frame_for_render(
 
     const frame_delay = p.pending_pts - render_clock;
     if (frame_delay <= 0.002) {
-        data.* = p.upload_buffer;
+        data.* = p.upload_planes[0];
         width.* = p.pending_width;
         height.* = p.pending_height;
-        linesize.* = p.pending_linesize;
+        linesize.* = p.pending_linesizes[0];
         p.have_pending_upload = 0;
         return 1;
     }
 
     return 0;
+}
+
+test "queuePushLocked records frame format metadata" {
+    var pipeline: c.VideoPipeline = std.mem.zeroes(c.VideoPipeline);
+    var src: [8]u8 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 };
+    var dst: [8]u8 = [_]u8{0} ** 8;
+
+    pipeline.frames[0].planes[0] = dst[0..].ptr;
+    pipeline.frames[0].linesizes[0] = 8;
+    pipeline.frames[0].width = 2;
+    pipeline.frames[0].height = 1;
+
+    try std.testing.expectEqual(@as(c_int, 0), queuePushLocked(&pipeline, src[0..].ptr, 8, 2, 1, c.VIDEO_FRAME_FORMAT_NV12, 1.5));
+    try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_NV12), pipeline.frames[0].format);
+    try std.testing.expectEqual(@as(c_int, 2), pipeline.frames[0].plane_count);
+}
+
+test "queuePopToUploadLocked swaps plane ownership" {
+    var pipeline: c.VideoPipeline = std.mem.zeroes(c.VideoPipeline);
+    const frame_ptr: [*c]u8 = @ptrFromInt(0x1000);
+    const upload_ptr: [*c]u8 = @ptrFromInt(0x2000);
+
+    pipeline.head = 0;
+    pipeline.tail = 1;
+    pipeline.count = 1;
+    pipeline.frames[0].planes[0] = frame_ptr;
+    pipeline.frames[0].width = 320;
+    pipeline.frames[0].height = 180;
+    pipeline.frames[0].linesizes[0] = 1280;
+    pipeline.frames[0].plane_count = 1;
+    pipeline.frames[0].format = c.VIDEO_FRAME_FORMAT_RGBA;
+    pipeline.frames[0].pts = 1.25;
+    pipeline.upload_planes[0] = upload_ptr;
+    pipeline.upload_plane_sizes[0] = 320 * 180 * 4;
+
+    try std.testing.expectEqual(@as(c_int, 0), queuePopToUploadLocked(&pipeline));
+    try std.testing.expectEqual(@as(c_int, 1), pipeline.have_pending_upload);
+    try std.testing.expect(pipeline.upload_planes[0] == frame_ptr);
+    try std.testing.expect(pipeline.frames[0].planes[0] == upload_ptr);
 }

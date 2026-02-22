@@ -2,11 +2,18 @@ const c = @import("../ffi/cplayer.zig").c;
 const Player = @import("../media/Player.zig").Player;
 
 pub const VideoPipeline = struct {
+    pub const FrameFormat = enum(c_int) {
+        rgba = c.VIDEO_FRAME_FORMAT_RGBA,
+        yuv420p = c.VIDEO_FRAME_FORMAT_YUV420P,
+        nv12 = c.VIDEO_FRAME_FORMAT_NV12,
+    };
+
     pub const VideoFrame = struct {
         data: [*c]u8,
         width: c_int,
         height: c_int,
         linesize: c_int,
+        format: FrameFormat,
     };
 
     handle: c.VideoPipeline = undefined,
@@ -71,6 +78,7 @@ pub const VideoPipeline = struct {
             .width = width,
             .height = height,
             .linesize = linesize,
+            .format = .rgba,
         };
     }
 };

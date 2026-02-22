@@ -7,6 +7,10 @@
 #define VIDEO_FORMAT_NV12 1
 #define VIDEO_FORMAT_YUV420P 2
 
+typedef struct {
+    int mode;
+} VideoPushConstants;
+
 static VkShaderModule create_shader_module_from_file(VkDevice device, const char* filepath) {
     FILE* f = fopen(filepath, "rb");
     if (!f) {
@@ -157,20 +161,70 @@ static int create_video_plane_resources(App* app, int width, int height, VkForma
 }
 
 static void update_slot_descriptor(Renderer* ren, RendererVideoSlot* slot) {
-    VkDescriptorImageInfo image_info_desc = {
-        .sampler = ren->video_sampler,
-        .imageView = slot->image_view,
-        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    VkImageView rgba_view = slot->image_view;
+    VkImageView y_view = slot->image_view;
+    VkImageView uv_or_u_view = slot->uv_image_view ? slot->uv_image_view : slot->image_view;
+    VkImageView v_view = slot->v_image_view ? slot->v_image_view : uv_or_u_view;
+
+    VkDescriptorImageInfo image_infos[4] = {
+        {
+            .sampler = ren->video_sampler,
+            .imageView = rgba_view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        },
+        {
+            .sampler = ren->video_sampler,
+            .imageView = y_view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        },
+        {
+            .sampler = ren->video_sampler,
+            .imageView = uv_or_u_view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        },
+        {
+            .sampler = ren->video_sampler,
+            .imageView = v_view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        },
     };
-    VkWriteDescriptorSet write = {
-        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstSet = slot->descriptor_set,
-        .dstBinding = 0,
-        .descriptorCount = 1,
-        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .pImageInfo = &image_info_desc,
+
+    VkWriteDescriptorSet writes[4] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = slot->descriptor_set,
+            .dstBinding = 0,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &image_infos[0],
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = slot->descriptor_set,
+            .dstBinding = 1,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &image_infos[1],
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = slot->descriptor_set,
+            .dstBinding = 2,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &image_infos[2],
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = slot->descriptor_set,
+            .dstBinding = 3,
+            .descriptorCount = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &image_infos[3],
+        },
     };
-    vkUpdateDescriptorSets(ren->app->device, 1, &write, 0, NULL);
+
+    vkUpdateDescriptorSets(ren->app->device, 4, writes, 0, NULL);
 }
 
 static void destroy_video_slot_resources(Renderer* ren, RendererVideoSlot* slot) {
@@ -439,16 +493,36 @@ int renderer_init(Renderer* ren, App* app) {
         goto fail;
     }
 
-    VkDescriptorSetLayoutBinding sampler_binding = {
-        .binding = 0,
-        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = 1,
-        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+    VkDescriptorSetLayoutBinding sampler_bindings[4] = {
+        {
+            .binding = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        {
+            .binding = 1,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        {
+            .binding = 2,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        {
+            .binding = 3,
+            .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+            .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
     };
     VkDescriptorSetLayoutCreateInfo descriptor_layout_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .bindingCount = 1,
-        .pBindings = &sampler_binding,
+        .bindingCount = 4,
+        .pBindings = sampler_bindings,
     };
     if (vkCreateDescriptorSetLayout(app->device, &descriptor_layout_info, NULL, &ren->descriptor_layout) != VK_SUCCESS) {
         goto fail;
@@ -456,7 +530,7 @@ int renderer_init(Renderer* ren, App* app) {
 
     VkDescriptorPoolSize descriptor_pool_size = {
         .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        .descriptorCount = VIDEO_UPLOAD_SLOTS,
+        .descriptorCount = VIDEO_UPLOAD_SLOTS * 4,
     };
     VkDescriptorPoolCreateInfo descriptor_pool_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
@@ -539,10 +613,17 @@ int renderer_init(Renderer* ren, App* app) {
     memcpy(mapped, vertices, sizeof(vertices));
     vkUnmapMemory(app->device, ren->vertex_memory);
 
+    VkPushConstantRange push_constant_range = {
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+        .offset = 0,
+        .size = sizeof(VideoPushConstants),
+    };
     VkPipelineLayoutCreateInfo pipeline_layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .setLayoutCount = 1,
         .pSetLayouts = &ren->descriptor_layout,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &push_constant_range,
     };
     if (vkCreatePipelineLayout(app->device, &pipeline_layout_info, NULL, &ren->pipeline_layout) != VK_SUCCESS) {
         goto fail;
@@ -1258,5 +1339,9 @@ void renderer_render(Renderer* ren) {
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ren->pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ren->pipeline_layout, 0, 1, &slot->descriptor_set, 0, NULL);
+    VideoPushConstants push_constants = {
+        .mode = ren->video_format,
+    };
+    vkCmdPushConstants(cmd, ren->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push_constants), &push_constants);
     vkCmdDraw(cmd, 6, 1, 0, 0);
 }

@@ -2,11 +2,19 @@ const c = @import("../ffi/cplayer.zig").c;
 const Player = @import("../media/Player.zig").Player;
 
 pub const VideoPipeline = struct {
+    pub const FrameFormat = enum(c_int) {
+        rgba = c.VIDEO_FRAME_FORMAT_RGBA,
+        yuv420p = c.VIDEO_FRAME_FORMAT_YUV420P,
+        nv12 = c.VIDEO_FRAME_FORMAT_NV12,
+    };
+
     pub const VideoFrame = struct {
-        data: [*c]u8,
+        planes: [3][*c]u8,
+        linesizes: [3]c_int,
+        plane_count: c_int,
         width: c_int,
         height: c_int,
-        linesize: c_int,
+        format: FrameFormat,
     };
 
     handle: c.VideoPipeline = undefined,
@@ -48,18 +56,22 @@ pub const VideoPipeline = struct {
             return null;
         }
 
-        var data: [*c]u8 = null;
+        var planes: [3][*c]u8 = .{ null, null, null };
         var width: c_int = 0;
         var height: c_int = 0;
-        var linesize: c_int = 0;
+        var linesizes: [3]c_int = .{ 0, 0, 0 };
+        var plane_count: c_int = 0;
+        var format: c_int = c.VIDEO_FRAME_FORMAT_RGBA;
 
         const ret = c.video_pipeline_get_frame_for_render(
             &self.handle,
             master_clock,
-            &data,
+            &planes,
             &width,
             &height,
-            &linesize,
+            &linesizes,
+            &plane_count,
+            &format,
         );
 
         if (ret <= 0) {
@@ -67,10 +79,16 @@ pub const VideoPipeline = struct {
         }
 
         return VideoFrame{
-            .data = data,
+            .planes = planes,
+            .linesizes = linesizes,
+            .plane_count = plane_count,
             .width = width,
             .height = height,
-            .linesize = linesize,
+            .format = switch (format) {
+                c.VIDEO_FRAME_FORMAT_NV12 => .nv12,
+                c.VIDEO_FRAME_FORMAT_YUV420P => .yuv420p,
+                else => .rgba,
+            },
         };
     }
 };

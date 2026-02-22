@@ -124,6 +124,7 @@ pub const PlaybackSession = struct {
     }
 
     fn destroyOutputs(self: *PlaybackSession) void {
+        self.player.stopDemuxer();
         self.video_pipeline.destroy();
         self.audio_output.destroy();
     }

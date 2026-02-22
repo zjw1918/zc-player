@@ -1,8 +1,217 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const c = @cImport({
     @cInclude("video/video_decoder.h");
     @cInclude("player/demuxer.h");
 });
+
+fn shouldTryVideoToolbox(codec_ctx: ?*c.AVCodecContext) bool {
+    if (builtin.os.tag != .macos or codec_ctx == null) {
+        return false;
+    }
+
+    const codec_id = codec_ctx.?.codec_id;
+    if (codec_id != c.AV_CODEC_ID_H264 and codec_id != c.AV_CODEC_ID_HEVC) {
+        return false;
+    }
+
+    return c.av_hwdevice_find_type_by_name("videotoolbox") != c.AV_HWDEVICE_TYPE_NONE;
+}
+
+fn chooseOutputPixelFormat(preferred: c.AVPixelFormat, pix_fmts: [*c]const c.AVPixelFormat) c.AVPixelFormat {
+    var i: usize = 0;
+    while (pix_fmts[i] != c.AV_PIX_FMT_NONE) : (i += 1) {
+        if (preferred != c.AV_PIX_FMT_NONE and pix_fmts[i] == preferred) {
+            return preferred;
+        }
+    }
+
+    return pix_fmts[0];
+}
+
+fn selectVideoToolboxPixelFormat(codec: ?*const c.AVCodec) c.AVPixelFormat {
+    if (codec == null) {
+        return c.AV_PIX_FMT_NONE;
+    }
+
+    var i: c_int = 0;
+    while (true) : (i += 1) {
+        const config = c.avcodec_get_hw_config(codec, i);
+        if (config == null) {
+            break;
+        }
+
+        if ((config.?.*.methods & c.AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) != 0 and
+            config.?.*.device_type == c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX)
+        {
+            return config.?.*.pix_fmt;
+        }
+    }
+
+    return c.AV_PIX_FMT_NONE;
+}
+
+fn decoderGetFormat(codec_ctx: ?*c.AVCodecContext, pix_fmts: [*c]const c.AVPixelFormat) callconv(.c) c.AVPixelFormat {
+    if (codec_ctx == null or pix_fmts == null) {
+        return c.AV_PIX_FMT_NONE;
+    }
+
+    const ctx = codec_ctx.?;
+    if (ctx.*.@"opaque" != null) {
+        const decoder: *c.VideoDecoder = @ptrCast(@alignCast(ctx.*.@"opaque"));
+        return chooseOutputPixelFormat(decoder.hw_pix_fmt, pix_fmts);
+    }
+
+    return chooseOutputPixelFormat(c.AV_PIX_FMT_NONE, pix_fmts);
+}
+
+fn disableHardwareDecode(decoder: *c.VideoDecoder) void {
+    decoder.hw_enabled = 0;
+    decoder.hw_pix_fmt = c.AV_PIX_FMT_NONE;
+
+    const codec_ctx = decoder.codec_ctx orelse return;
+
+    if (codec_ctx.*.hw_device_ctx != null) {
+        c.av_buffer_unref(&codec_ctx.*.hw_device_ctx);
+    }
+
+    codec_ctx.*.get_format = null;
+    codec_ctx.*.@"opaque" = null;
+}
+
+fn configureHardwareDecode(decoder: *c.VideoDecoder, codec: ?*const c.AVCodec) void {
+    disableHardwareDecode(decoder);
+
+    const codec_ctx = decoder.codec_ctx orelse return;
+
+    if (!shouldTryVideoToolbox(codec_ctx)) {
+        return;
+    }
+
+    const hw_pix_fmt = selectVideoToolboxPixelFormat(codec);
+    if (hw_pix_fmt == c.AV_PIX_FMT_NONE) {
+        return;
+    }
+
+    var hw_device_ctx: ?*c.AVBufferRef = null;
+    if (c.av_hwdevice_ctx_create(&hw_device_ctx, c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX, null, null, 0) < 0 or hw_device_ctx == null) {
+        return;
+    }
+
+    codec_ctx.*.hw_device_ctx = c.av_buffer_ref(hw_device_ctx);
+    c.av_buffer_unref(&hw_device_ctx);
+
+    if (codec_ctx.*.hw_device_ctx == null) {
+        return;
+    }
+
+    codec_ctx.*.@"opaque" = decoder;
+    codec_ctx.*.get_format = decoderGetFormat;
+    decoder.hw_pix_fmt = hw_pix_fmt;
+    decoder.hw_enabled = 1;
+}
+
+fn ensureRgbaBuffer(decoder: *c.VideoDecoder, width: c_int, height: c_int) c_int {
+    const required_size = c.av_image_get_buffer_size(c.AV_PIX_FMT_RGBA, width, height, 1);
+    if (required_size <= 0) {
+        return -1;
+    }
+
+    if (decoder.buffer == null or decoder.buffer_size < required_size) {
+        const new_buffer = if (decoder.buffer == null)
+            c.av_malloc(@intCast(required_size))
+        else
+            c.av_realloc(decoder.buffer, @intCast(required_size));
+
+        if (new_buffer == null) {
+            return -1;
+        }
+
+        decoder.buffer = @ptrCast(new_buffer);
+        decoder.buffer_size = required_size;
+    }
+
+    if (c.av_image_fill_arrays(
+        &decoder.temp_data,
+        &decoder.temp_linesize,
+        decoder.buffer,
+        c.AV_PIX_FMT_RGBA,
+        width,
+        height,
+        1,
+    ) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+fn ensureScaleContext(decoder: *c.VideoDecoder, src_frame: *c.AVFrame) c_int {
+    if (src_frame.*.width <= 0 or src_frame.*.height <= 0) {
+        return -1;
+    }
+
+    const src_fmt: c.AVPixelFormat = src_frame.*.format;
+    const dimensions_changed = decoder.width != src_frame.*.width or decoder.height != src_frame.*.height;
+    const format_changed = decoder.sws_src_fmt != src_fmt;
+
+    if (decoder.sws_ctx == null or dimensions_changed or format_changed) {
+        if (decoder.sws_ctx != null) {
+            c.sws_freeContext(decoder.sws_ctx);
+            decoder.sws_ctx = null;
+        }
+
+        decoder.sws_ctx = c.sws_getContext(
+            src_frame.*.width,
+            src_frame.*.height,
+            src_fmt,
+            src_frame.*.width,
+            src_frame.*.height,
+            c.AV_PIX_FMT_RGBA,
+            c.SWS_FAST_BILINEAR,
+            null,
+            null,
+            null,
+        );
+        if (decoder.sws_ctx == null) {
+            return -1;
+        }
+
+        decoder.sws_src_fmt = src_fmt;
+        decoder.width = src_frame.*.width;
+        decoder.height = src_frame.*.height;
+    }
+
+    return ensureRgbaBuffer(decoder, src_frame.*.width, src_frame.*.height);
+}
+
+fn sourceFrameForScale(decoder: *c.VideoDecoder) ?*c.AVFrame {
+    if (decoder.frame == null) {
+        return null;
+    }
+
+    if (decoder.hw_enabled != 0 and decoder.sw_frame != null and decoder.sw_frame.*.data[0] != null) {
+        return decoder.sw_frame;
+    }
+
+    return decoder.frame;
+}
+
+fn decodeFormatTag(pix_fmt: c.AVPixelFormat) c_int {
+    return switch (pix_fmt) {
+        c.AV_PIX_FMT_YUV420P => c.VIDEO_FRAME_FORMAT_YUV420P,
+        c.AV_PIX_FMT_NV12 => c.VIDEO_FRAME_FORMAT_NV12,
+        else => c.VIDEO_FRAME_FORMAT_RGBA,
+    };
+}
+
+fn planeCountForFormatTag(format: c_int) c_int {
+    return switch (format) {
+        c.VIDEO_FRAME_FORMAT_YUV420P => 3,
+        c.VIDEO_FRAME_FORMAT_NV12 => 2,
+        else => 1,
+    };
+}
 
 pub export fn video_decoder_init(dec: ?*c.VideoDecoder, stream: ?*c.AVStream) c_int {
     if (dec == null) {
@@ -11,6 +220,8 @@ pub export fn video_decoder_init(dec: ?*c.VideoDecoder, stream: ?*c.AVStream) c_
 
     const d = dec.?;
     d.* = std.mem.zeroes(c.VideoDecoder);
+    d.sws_src_fmt = c.AV_PIX_FMT_NONE;
+    d.hw_pix_fmt = c.AV_PIX_FMT_NONE;
 
     if (stream == null or stream.?.codecpar == null or stream.?.codecpar.*.codec_type != c.AVMEDIA_TYPE_VIDEO) {
         return -1;
@@ -31,14 +242,25 @@ pub export fn video_decoder_init(dec: ?*c.VideoDecoder, stream: ?*c.AVStream) c_
         return -1;
     }
 
+    configureHardwareDecode(d, codec);
+
     if (c.avcodec_open2(d.codec_ctx, codec, null) < 0) {
-        video_decoder_destroy(d);
-        return -1;
+        if (d.hw_enabled != 0) {
+            disableHardwareDecode(d);
+            if (c.avcodec_open2(d.codec_ctx, codec, null) < 0) {
+                video_decoder_destroy(d);
+                return -1;
+            }
+        } else {
+            video_decoder_destroy(d);
+            return -1;
+        }
     }
 
     d.packet = c.av_packet_alloc();
     d.frame = c.av_frame_alloc();
-    if (d.packet == null or d.frame == null) {
+    d.sw_frame = c.av_frame_alloc();
+    if (d.packet == null or d.frame == null or d.sw_frame == null) {
         video_decoder_destroy(d);
         return -1;
     }
@@ -50,37 +272,7 @@ pub export fn video_decoder_init(dec: ?*c.VideoDecoder, stream: ?*c.AVStream) c_
     d.eof = 0;
     d.sent_eof = 0;
 
-    d.sws_ctx = c.sws_getContext(
-        d.width,
-        d.height,
-        d.codec_ctx.*.pix_fmt,
-        d.width,
-        d.height,
-        c.AV_PIX_FMT_RGBA,
-        c.SWS_BILINEAR,
-        null,
-        null,
-        null,
-    );
-
-    if (d.sws_ctx == null) {
-        video_decoder_destroy(d);
-        return -1;
-    }
-
-    const buffer_size = c.av_image_get_buffer_size(c.AV_PIX_FMT_RGBA, d.width, d.height, 1);
-    if (buffer_size <= 0) {
-        video_decoder_destroy(d);
-        return -1;
-    }
-
-    d.buffer = @ptrCast(c.av_malloc(@intCast(buffer_size)));
-    if (d.buffer == null) {
-        video_decoder_destroy(d);
-        return -1;
-    }
-
-    if (c.av_image_fill_arrays(&d.temp_data, &d.temp_linesize, d.buffer, c.AV_PIX_FMT_RGBA, d.width, d.height, 1) < 0) {
+    if (d.width > 0 and d.height > 0 and ensureRgbaBuffer(d, d.width, d.height) != 0) {
         video_decoder_destroy(d);
         return -1;
     }
@@ -98,11 +290,16 @@ pub export fn video_decoder_destroy(dec: ?*c.VideoDecoder) void {
     if (d.buffer != null) {
         c.av_free(d.buffer);
         d.buffer = null;
+        d.buffer_size = 0;
     }
 
     if (d.sws_ctx != null) {
         c.sws_freeContext(d.sws_ctx);
         d.sws_ctx = null;
+    }
+
+    if (d.sw_frame != null) {
+        c.av_frame_free(&d.sw_frame);
     }
 
     if (d.frame != null) {
@@ -112,6 +309,8 @@ pub export fn video_decoder_destroy(dec: ?*c.VideoDecoder) void {
     if (d.packet != null) {
         c.av_packet_free(&d.packet);
     }
+
+    disableHardwareDecode(d);
 
     if (d.codec_ctx != null) {
         c.avcodec_free_context(&d.codec_ctx);
@@ -123,6 +322,7 @@ pub export fn video_decoder_destroy(dec: ?*c.VideoDecoder) void {
     d.pts = 0.0;
     d.eof = 0;
     d.sent_eof = 0;
+    d.sws_src_fmt = c.AV_PIX_FMT_NONE;
 }
 
 pub export fn video_decoder_flush(dec: ?*c.VideoDecoder) void {
@@ -140,6 +340,10 @@ pub export fn video_decoder_flush(dec: ?*c.VideoDecoder) void {
 
     if (d.frame != null) {
         c.av_frame_unref(d.frame);
+    }
+
+    if (d.sw_frame != null) {
+        c.av_frame_unref(d.sw_frame);
     }
 
     d.eof = 0;
@@ -161,6 +365,19 @@ pub export fn video_decoder_decode_frame(dec: ?*c.VideoDecoder, demuxer: ?*c.Dem
         var ret = c.avcodec_receive_frame(d.codec_ctx, d.frame);
 
         if (ret == 0) {
+            if (d.hw_enabled != 0 and d.frame.*.format == d.hw_pix_fmt) {
+                if (d.sw_frame == null) {
+                    return -1;
+                }
+
+                c.av_frame_unref(d.sw_frame);
+                if (c.av_hwframe_transfer_data(d.sw_frame, d.frame, 0) < 0) {
+                    return -1;
+                }
+
+                _ = c.av_frame_copy_props(d.sw_frame, d.frame);
+            }
+
             var ts = d.frame.*.best_effort_timestamp;
             if (ts == c.AV_NOPTS_VALUE) {
                 ts = d.frame.*.pts;
@@ -223,16 +440,18 @@ pub export fn video_decoder_get_image(dec: ?*c.VideoDecoder, data: [*c][*c]u8, l
     }
 
     const d = dec.?;
-    if (d.sws_ctx == null or d.frame == null) {
+    const src_frame = sourceFrameForScale(d) orelse return -1;
+
+    if (ensureScaleContext(d, src_frame) != 0) {
         return -1;
     }
 
     const h = c.sws_scale(
         d.sws_ctx,
-        @ptrCast(&d.frame.*.data),
-        @ptrCast(&d.frame.*.linesize),
+        @ptrCast(&src_frame.*.data),
+        @ptrCast(&src_frame.*.linesize),
         0,
-        d.height,
+        src_frame.*.height,
         &d.temp_data,
         &d.temp_linesize,
     );
@@ -244,4 +463,89 @@ pub export fn video_decoder_get_image(dec: ?*c.VideoDecoder, data: [*c][*c]u8, l
     data.* = d.temp_data[0];
     linesize.* = d.temp_linesize[0];
     return 0;
+}
+
+pub export fn video_decoder_get_format(dec: ?*c.VideoDecoder) c_int {
+    if (dec == null) {
+        return c.VIDEO_FRAME_FORMAT_RGBA;
+    }
+
+    const src_frame = sourceFrameForScale(dec.?) orelse return c.VIDEO_FRAME_FORMAT_RGBA;
+    const pix_fmt: c.AVPixelFormat = src_frame.*.format;
+    return decodeFormatTag(pix_fmt);
+}
+
+pub export fn video_decoder_get_planes(
+    dec: ?*c.VideoDecoder,
+    planes: [*c][*c]u8,
+    linesizes: [*c]c_int,
+    plane_count: [*c]c_int,
+) c_int {
+    if (dec == null or planes == null or linesizes == null or plane_count == null) {
+        return -1;
+    }
+
+    const d = dec.?;
+    const src_frame = sourceFrameForScale(d) orelse return -1;
+    const format = decodeFormatTag(src_frame.*.format);
+
+    if (format == c.VIDEO_FRAME_FORMAT_RGBA) {
+        var data0: [*c]u8 = null;
+        var linesize0: c_int = 0;
+        if (video_decoder_get_image(dec, &data0, &linesize0) != 0) {
+            return -1;
+        }
+
+        planes[0] = data0;
+        linesizes[0] = linesize0;
+        plane_count.* = 1;
+        return 0;
+    }
+
+    const count = planeCountForFormatTag(format);
+    var i: c_int = 0;
+    while (i < count) : (i += 1) {
+        const idx: usize = @intCast(i);
+        planes[idx] = src_frame.*.data[idx];
+        linesizes[idx] = src_frame.*.linesize[idx];
+    }
+
+    plane_count.* = count;
+    return 0;
+}
+
+test "chooseOutputPixelFormat prefers requested format" {
+    const formats = [_]c.AVPixelFormat{
+        c.AV_PIX_FMT_YUV420P,
+        c.AV_PIX_FMT_NV12,
+        c.AV_PIX_FMT_NONE,
+    };
+
+    try std.testing.expectEqual(c.AV_PIX_FMT_NV12, chooseOutputPixelFormat(c.AV_PIX_FMT_NV12, &formats));
+}
+
+test "chooseOutputPixelFormat falls back to first offered format" {
+    const formats = [_]c.AVPixelFormat{
+        c.AV_PIX_FMT_YUV420P,
+        c.AV_PIX_FMT_NV12,
+        c.AV_PIX_FMT_NONE,
+    };
+
+    try std.testing.expectEqual(c.AV_PIX_FMT_YUV420P, chooseOutputPixelFormat(c.AV_PIX_FMT_RGBA, &formats));
+}
+
+test "decodeFormatTag maps yuv420p and nv12" {
+    try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_YUV420P), decodeFormatTag(c.AV_PIX_FMT_YUV420P));
+    try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_NV12), decodeFormatTag(c.AV_PIX_FMT_NV12));
+}
+
+test "decodeFormatTag defaults unknown formats to rgba" {
+    try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_RGBA), decodeFormatTag(c.AV_PIX_FMT_RGBA));
+    try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_RGBA), decodeFormatTag(c.AV_PIX_FMT_GRAY8));
+}
+
+test "planeCountForFormatTag reports expected yuv plane counts" {
+    try std.testing.expectEqual(@as(c_int, 1), planeCountForFormatTag(c.VIDEO_FRAME_FORMAT_RGBA));
+    try std.testing.expectEqual(@as(c_int, 3), planeCountForFormatTag(c.VIDEO_FRAME_FORMAT_YUV420P));
+    try std.testing.expectEqual(@as(c_int, 2), planeCountForFormatTag(c.VIDEO_FRAME_FORMAT_NV12));
 }

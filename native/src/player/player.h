@@ -62,6 +62,8 @@ double player_get_playback_speed(Player* player);
 double player_get_time(Player* player);
 int player_decode_frame(Player* player);
 int player_get_video_frame(Player* player, uint8_t** data, int* linesize);
+int player_get_video_planes(Player* player, uint8_t** planes, int* linesizes, int* plane_count);
+int player_get_video_format(Player* player);
 double player_get_video_pts(Player* player);
 int player_has_audio(Player* player);
 int player_get_audio_sample_rate(Player* player);
@@ -69,6 +71,7 @@ int player_get_audio_channels(Player* player);
 int player_decode_audio(Player* player);
 int player_get_audio_samples(Player* player, uint8_t** data, int* nb_samples);
 double player_get_audio_pts(Player* player);
+void player_stop_demuxer(Player* player);
 
 #ifdef __cplusplus
 }

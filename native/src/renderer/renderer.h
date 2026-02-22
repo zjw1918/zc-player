@@ -13,10 +13,24 @@ typedef struct {
     VkImageView image_view;
     VkBuffer staging_buffer;
     VkDeviceMemory staging_memory;
+    uint8_t* staging_mapped;
+    VkImage uv_image;
+    VkDeviceMemory uv_image_memory;
+    VkImageView uv_image_view;
+    VkBuffer uv_staging_buffer;
+    VkDeviceMemory uv_staging_memory;
+    uint8_t* uv_staging_mapped;
+    VkImage v_image;
+    VkDeviceMemory v_image_memory;
+    VkImageView v_image_view;
+    VkBuffer v_staging_buffer;
+    VkDeviceMemory v_staging_memory;
+    uint8_t* v_staging_mapped;
     VkCommandBuffer upload_cmd;
     VkFence upload_fence;
     VkDescriptorSet descriptor_set;
     int image_initialized;
+    int yuv_initialized;
 } RendererVideoSlot;
 
 typedef struct {
@@ -35,12 +49,15 @@ typedef struct {
     uint32_t next_slot;
     int video_width;
     int video_height;
+    int video_format;
     int has_video;
 } Renderer;
 
 int renderer_init(Renderer* ren, App* app);
 void renderer_destroy(Renderer* ren);
 int renderer_upload_video(Renderer* ren, uint8_t* data, int width, int height, int linesize);
+int renderer_upload_video_nv12(Renderer* ren, uint8_t* y_plane, int y_linesize, uint8_t* uv_plane, int uv_linesize, int width, int height);
+int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesize, uint8_t* u_plane, int u_linesize, uint8_t* v_plane, int v_linesize, int width, int height);
 int renderer_recreate_for_swapchain(Renderer* ren);
 void renderer_render(Renderer* ren);
 

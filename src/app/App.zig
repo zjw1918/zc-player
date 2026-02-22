@@ -4,6 +4,22 @@ const SnapshotMod = @import("../engine/Snapshot.zig");
 const PlaybackState = SnapshotMod.PlaybackState;
 const gui = @import("../ffi/gui.zig").c;
 
+const UploadPath = enum {
+    rgba,
+    nv12,
+    yuv420p,
+};
+
+fn selectUploadPath(format: c_int, plane_count: c_int) UploadPath {
+    if (format == gui.VIDEO_FRAME_FORMAT_NV12 and plane_count >= 2) {
+        return .nv12;
+    }
+    if (format == gui.VIDEO_FRAME_FORMAT_YUV420P and plane_count >= 3) {
+        return .yuv420p;
+    }
+    return .rgba;
+}
+
 fn playerStateFromValue(value: c_int) gui.PlayerState {
     return switch (@typeInfo(gui.PlayerState)) {
         .@"enum" => @enumFromInt(value),
@@ -163,7 +179,42 @@ pub const App = struct {
 
             if (snapshot.state == .playing) {
                 if (self.engine.getFrameForRender(snapshot.current_time)) |frame| {
-                    _ = gui.renderer_upload_video(&renderer, frame.data, frame.width, frame.height, frame.linesize);
+                    const path = selectUploadPath(@intFromEnum(frame.format), frame.plane_count);
+                    switch (path) {
+                        .nv12 => {
+                            _ = gui.renderer_upload_video_nv12(
+                                &renderer,
+                                frame.planes[0],
+                                frame.linesizes[0],
+                                frame.planes[1],
+                                frame.linesizes[1],
+                                frame.width,
+                                frame.height,
+                            );
+                        },
+                        .yuv420p => {
+                            _ = gui.renderer_upload_video_yuv420p(
+                                &renderer,
+                                frame.planes[0],
+                                frame.linesizes[0],
+                                frame.planes[1],
+                                frame.linesizes[1],
+                                frame.planes[2],
+                                frame.linesizes[2],
+                                frame.width,
+                                frame.height,
+                            );
+                        },
+                        .rgba => {
+                            _ = gui.renderer_upload_video(
+                                &renderer,
+                                frame.planes[0],
+                                frame.width,
+                                frame.height,
+                                frame.linesizes[0],
+                            );
+                        },
+                    }
                 }
             }
 
@@ -197,4 +248,15 @@ test "swapchain recreate callback stops app on renderer recreate failure" {
 
 test "swapchain recreate callback handles null userdata" {
     swapchainRecreatedCallback(null);
+}
+
+test "selectUploadPath prefers nv12 and yuv420p over rgba" {
+    try std.testing.expectEqual(.nv12, selectUploadPath(gui.VIDEO_FRAME_FORMAT_NV12, 2));
+    try std.testing.expectEqual(.yuv420p, selectUploadPath(gui.VIDEO_FRAME_FORMAT_YUV420P, 3));
+    try std.testing.expectEqual(.rgba, selectUploadPath(gui.VIDEO_FRAME_FORMAT_RGBA, 1));
+}
+
+test "selectUploadPath falls back to rgba when planes are incomplete" {
+    try std.testing.expectEqual(.rgba, selectUploadPath(gui.VIDEO_FRAME_FORMAT_NV12, 1));
+    try std.testing.expectEqual(.rgba, selectUploadPath(gui.VIDEO_FRAME_FORMAT_YUV420P, 2));
 }

@@ -431,6 +431,19 @@ pub export fn player_get_video_frame(player: ?*c.Player, data: [*c][*c]u8, lines
     return c.video_decoder_get_image(&player.?.decoder, data, linesize);
 }
 
+pub export fn player_get_video_planes(
+    player: ?*c.Player,
+    planes: [*c][*c]u8,
+    linesizes: [*c]c_int,
+    plane_count: [*c]c_int,
+) c_int {
+    if (player == null or planes == null or linesizes == null or plane_count == null) {
+        return -1;
+    }
+
+    return c.video_decoder_get_planes(&player.?.decoder, planes, linesizes, plane_count);
+}
+
 pub export fn player_get_video_format(player: ?*c.Player) c_int {
     if (player == null) {
         return c.VIDEO_FRAME_FORMAT_RGBA;

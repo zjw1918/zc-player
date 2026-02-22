@@ -9,6 +9,12 @@ pub const Player = struct {
     handle: c.Player = undefined,
     initialized: bool = false,
 
+    pub const VideoPlanes = struct {
+        planes: [4][*c]u8,
+        linesizes: [4]c_int,
+        plane_count: c_int,
+    };
+
     pub fn init(self: *Player) !void {
         if (self.initialized) {
             return error.AlreadyInitialized;
@@ -115,6 +121,22 @@ pub const Player = struct {
 
     pub fn videoFormat(self: *Player) c_int {
         return c.player_get_video_format(&self.handle);
+    }
+
+    pub fn videoPlanes(self: *Player) ?VideoPlanes {
+        var planes: [4][*c]u8 = .{ null, null, null, null };
+        var linesizes: [4]c_int = .{ 0, 0, 0, 0 };
+        var plane_count: c_int = 0;
+
+        if (c.player_get_video_planes(&self.handle, &planes, &linesizes, &plane_count) != 0) {
+            return null;
+        }
+
+        return VideoPlanes{
+            .planes = planes,
+            .linesizes = linesizes,
+            .plane_count = plane_count,
+        };
     }
 
     pub fn clampCurrentTimeToDuration(self: *Player) void {

@@ -205,6 +205,14 @@ fn decodeFormatTag(pix_fmt: c.AVPixelFormat) c_int {
     };
 }
 
+fn planeCountForFormatTag(format: c_int) c_int {
+    return switch (format) {
+        c.VIDEO_FRAME_FORMAT_YUV420P => 3,
+        c.VIDEO_FRAME_FORMAT_NV12 => 2,
+        else => 1,
+    };
+}
+
 pub export fn video_decoder_init(dec: ?*c.VideoDecoder, stream: ?*c.AVStream) c_int {
     if (dec == null) {
         return -1;
@@ -467,6 +475,45 @@ pub export fn video_decoder_get_format(dec: ?*c.VideoDecoder) c_int {
     return decodeFormatTag(pix_fmt);
 }
 
+pub export fn video_decoder_get_planes(
+    dec: ?*c.VideoDecoder,
+    planes: [*c][*c]u8,
+    linesizes: [*c]c_int,
+    plane_count: [*c]c_int,
+) c_int {
+    if (dec == null or planes == null or linesizes == null or plane_count == null) {
+        return -1;
+    }
+
+    const d = dec.?;
+    const src_frame = sourceFrameForScale(d) orelse return -1;
+    const format = decodeFormatTag(src_frame.*.format);
+
+    if (format == c.VIDEO_FRAME_FORMAT_RGBA) {
+        var data0: [*c]u8 = null;
+        var linesize0: c_int = 0;
+        if (video_decoder_get_image(dec, &data0, &linesize0) != 0) {
+            return -1;
+        }
+
+        planes[0] = data0;
+        linesizes[0] = linesize0;
+        plane_count.* = 1;
+        return 0;
+    }
+
+    const count = planeCountForFormatTag(format);
+    var i: c_int = 0;
+    while (i < count) : (i += 1) {
+        const idx: usize = @intCast(i);
+        planes[idx] = src_frame.*.data[idx];
+        linesizes[idx] = src_frame.*.linesize[idx];
+    }
+
+    plane_count.* = count;
+    return 0;
+}
+
 test "chooseOutputPixelFormat prefers requested format" {
     const formats = [_]c.AVPixelFormat{
         c.AV_PIX_FMT_YUV420P,
@@ -495,4 +542,10 @@ test "decodeFormatTag maps yuv420p and nv12" {
 test "decodeFormatTag defaults unknown formats to rgba" {
     try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_RGBA), decodeFormatTag(c.AV_PIX_FMT_RGBA));
     try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_RGBA), decodeFormatTag(c.AV_PIX_FMT_GRAY8));
+}
+
+test "planeCountForFormatTag reports expected yuv plane counts" {
+    try std.testing.expectEqual(@as(c_int, 1), planeCountForFormatTag(c.VIDEO_FRAME_FORMAT_RGBA));
+    try std.testing.expectEqual(@as(c_int, 3), planeCountForFormatTag(c.VIDEO_FRAME_FORMAT_YUV420P));
+    try std.testing.expectEqual(@as(c_int, 2), planeCountForFormatTag(c.VIDEO_FRAME_FORMAT_NV12));
 }

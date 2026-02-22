@@ -92,7 +92,7 @@ static int create_buffer(App* app, VkDeviceSize size, VkBufferUsageFlags usage, 
     return 0;
 }
 
-static int create_video_plane_resources(App* app, int width, int height, VkFormat format, VkImage* image, VkDeviceMemory* image_memory, VkImageView* image_view, VkBuffer* staging_buffer, VkDeviceMemory* staging_memory) {
+static int create_video_plane_resources(App* app, int width, int height, VkFormat format, VkImage* image, VkDeviceMemory* image_memory, VkImageView* image_view, VkBuffer* staging_buffer, VkDeviceMemory* staging_memory, uint8_t** staging_mapped) {
     VkDeviceSize data_size = (VkDeviceSize)(size_t)width * (VkDeviceSize)(size_t)height;
     if (format == VK_FORMAT_R8G8_UNORM) {
         data_size *= 2;
@@ -101,6 +101,12 @@ static int create_video_plane_resources(App* app, int width, int height, VkForma
     if (create_buffer(app, data_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, staging_buffer, staging_memory) != 0) {
         return -1;
     }
+
+    void* mapped = NULL;
+    if (vkMapMemory(app->device, *staging_memory, 0, data_size, 0, &mapped) != VK_SUCCESS) {
+        return -1;
+    }
+    *staging_mapped = (uint8_t*)mapped;
 
     VkImageCreateInfo image_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -230,6 +236,11 @@ static void update_slot_descriptor(Renderer* ren, RendererVideoSlot* slot) {
 static void destroy_video_slot_resources(Renderer* ren, RendererVideoSlot* slot) {
     App* app = ren->app;
 
+    if (slot->staging_memory && slot->staging_mapped) {
+        vkUnmapMemory(app->device, slot->staging_memory);
+        slot->staging_mapped = NULL;
+    }
+
     if (slot->image_view) {
         vkDestroyImageView(app->device, slot->image_view, NULL);
         slot->image_view = VK_NULL_HANDLE;
@@ -251,6 +262,11 @@ static void destroy_video_slot_resources(Renderer* ren, RendererVideoSlot* slot)
         slot->staging_memory = VK_NULL_HANDLE;
     }
 
+    if (slot->uv_staging_memory && slot->uv_staging_mapped) {
+        vkUnmapMemory(app->device, slot->uv_staging_memory);
+        slot->uv_staging_mapped = NULL;
+    }
+
     if (slot->uv_image_view) {
         vkDestroyImageView(app->device, slot->uv_image_view, NULL);
         slot->uv_image_view = VK_NULL_HANDLE;
@@ -270,6 +286,11 @@ static void destroy_video_slot_resources(Renderer* ren, RendererVideoSlot* slot)
     if (slot->uv_staging_memory) {
         vkFreeMemory(app->device, slot->uv_staging_memory, NULL);
         slot->uv_staging_memory = VK_NULL_HANDLE;
+    }
+
+    if (slot->v_staging_memory && slot->v_staging_mapped) {
+        vkUnmapMemory(app->device, slot->v_staging_memory);
+        slot->v_staging_mapped = NULL;
     }
 
     if (slot->v_image_view) {
@@ -298,7 +319,7 @@ static void destroy_video_slot_resources(Renderer* ren, RendererVideoSlot* slot)
 }
 
 static int create_video_slot_resources(Renderer* ren, RendererVideoSlot* slot, int width, int height) {
-    if (create_video_plane_resources(ren->app, width, height, VK_FORMAT_R8G8B8A8_UNORM, &slot->image, &slot->image_memory, &slot->image_view, &slot->staging_buffer, &slot->staging_memory) != 0) {
+    if (create_video_plane_resources(ren->app, width, height, VK_FORMAT_R8G8B8A8_UNORM, &slot->image, &slot->image_memory, &slot->image_view, &slot->staging_buffer, &slot->staging_memory, &slot->staging_mapped) != 0) {
         destroy_video_slot_resources(ren, slot);
         return -1;
     }
@@ -314,11 +335,11 @@ static int create_video_slot_resources_nv12(Renderer* ren, RendererVideoSlot* sl
     int chroma_width = (width + 1) / 2;
     int chroma_height = (height + 1) / 2;
 
-    if (create_video_plane_resources(ren->app, width, height, VK_FORMAT_R8_UNORM, &slot->image, &slot->image_memory, &slot->image_view, &slot->staging_buffer, &slot->staging_memory) != 0) {
+    if (create_video_plane_resources(ren->app, width, height, VK_FORMAT_R8_UNORM, &slot->image, &slot->image_memory, &slot->image_view, &slot->staging_buffer, &slot->staging_memory, &slot->staging_mapped) != 0) {
         destroy_video_slot_resources(ren, slot);
         return -1;
     }
-    if (create_video_plane_resources(ren->app, chroma_width, chroma_height, VK_FORMAT_R8G8_UNORM, &slot->uv_image, &slot->uv_image_memory, &slot->uv_image_view, &slot->uv_staging_buffer, &slot->uv_staging_memory) != 0) {
+    if (create_video_plane_resources(ren->app, chroma_width, chroma_height, VK_FORMAT_R8G8_UNORM, &slot->uv_image, &slot->uv_image_memory, &slot->uv_image_view, &slot->uv_staging_buffer, &slot->uv_staging_memory, &slot->uv_staging_mapped) != 0) {
         destroy_video_slot_resources(ren, slot);
         return -1;
     }
@@ -334,15 +355,15 @@ static int create_video_slot_resources_yuv420p(Renderer* ren, RendererVideoSlot*
     int chroma_width = (width + 1) / 2;
     int chroma_height = (height + 1) / 2;
 
-    if (create_video_plane_resources(ren->app, width, height, VK_FORMAT_R8_UNORM, &slot->image, &slot->image_memory, &slot->image_view, &slot->staging_buffer, &slot->staging_memory) != 0) {
+    if (create_video_plane_resources(ren->app, width, height, VK_FORMAT_R8_UNORM, &slot->image, &slot->image_memory, &slot->image_view, &slot->staging_buffer, &slot->staging_memory, &slot->staging_mapped) != 0) {
         destroy_video_slot_resources(ren, slot);
         return -1;
     }
-    if (create_video_plane_resources(ren->app, chroma_width, chroma_height, VK_FORMAT_R8_UNORM, &slot->uv_image, &slot->uv_image_memory, &slot->uv_image_view, &slot->uv_staging_buffer, &slot->uv_staging_memory) != 0) {
+    if (create_video_plane_resources(ren->app, chroma_width, chroma_height, VK_FORMAT_R8_UNORM, &slot->uv_image, &slot->uv_image_memory, &slot->uv_image_view, &slot->uv_staging_buffer, &slot->uv_staging_memory, &slot->uv_staging_mapped) != 0) {
         destroy_video_slot_resources(ren, slot);
         return -1;
     }
-    if (create_video_plane_resources(ren->app, chroma_width, chroma_height, VK_FORMAT_R8_UNORM, &slot->v_image, &slot->v_image_memory, &slot->v_image_view, &slot->v_staging_buffer, &slot->v_staging_memory) != 0) {
+    if (create_video_plane_resources(ren->app, chroma_width, chroma_height, VK_FORMAT_R8_UNORM, &slot->v_image, &slot->v_image_memory, &slot->v_image_view, &slot->v_staging_buffer, &slot->v_staging_memory, &slot->v_staging_mapped) != 0) {
         destroy_video_slot_resources(ren, slot);
         return -1;
     }
@@ -381,6 +402,38 @@ static int recreate_video_resources(Renderer* ren, int width, int height, int vi
     ren->next_slot = 0;
     ren->has_video = 0;
     return 0;
+}
+
+static int acquire_upload_slot(Renderer* ren, uint32_t* out_slot_index) {
+    App* app = ren->app;
+
+    for (uint32_t i = 0; i < VIDEO_UPLOAD_SLOTS; i++) {
+        uint32_t idx = (ren->next_slot + i) % VIDEO_UPLOAD_SLOTS;
+        RendererVideoSlot* slot = &ren->video_slots[idx];
+
+        VkResult status = vkGetFenceStatus(app->device, slot->upload_fence);
+        if (status == VK_SUCCESS) {
+            if (vkResetFences(app->device, 1, &slot->upload_fence) != VK_SUCCESS) {
+                return -1;
+            }
+
+            ren->next_slot = (idx + 1) % VIDEO_UPLOAD_SLOTS;
+            *out_slot_index = idx;
+            return 0;
+        }
+
+        if (status != VK_NOT_READY) {
+            return -1;
+        }
+    }
+
+    return 1;
+}
+
+static void copy_plane_rows(uint8_t* dst, size_t dst_row_size, const uint8_t* src, int src_linesize, int rows) {
+    for (int y = 0; y < rows; y++) {
+        memcpy(dst + ((size_t)y * dst_row_size), src + ((size_t)y * (size_t)src_linesize), dst_row_size);
+    }
 }
 
 static int create_graphics_pipeline(Renderer* ren) {
@@ -733,26 +786,18 @@ int renderer_upload_video(Renderer* ren, uint8_t* data, int width, int height, i
         }
     }
 
-    uint32_t slot_index = ren->next_slot;
-    ren->next_slot = (ren->next_slot + 1) % VIDEO_UPLOAD_SLOTS;
+    uint32_t slot_index = 0;
+    int slot_status = acquire_upload_slot(ren, &slot_index);
+    if (slot_status != 0) {
+        return slot_status > 0 ? 1 : -1;
+    }
 
     RendererVideoSlot* slot = &ren->video_slots[slot_index];
 
-    if (vkWaitForFences(app->device, 1, &slot->upload_fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+    if (slot->staging_mapped == NULL) {
         return -1;
     }
-    if (vkResetFences(app->device, 1, &slot->upload_fence) != VK_SUCCESS) {
-        return -1;
-    }
-
-    void* mapped;
-    if (vkMapMemory(app->device, slot->staging_memory, 0, row_size * (size_t)height, 0, &mapped) != VK_SUCCESS) {
-        return -1;
-    }
-    for (int y = 0; y < height; y++) {
-        memcpy((uint8_t*)mapped + ((size_t)y * row_size), data + ((size_t)y * linesize), row_size);
-    }
-    vkUnmapMemory(app->device, slot->staging_memory);
+    copy_plane_rows(slot->staging_mapped, row_size, data, linesize, height);
 
     if (vkResetCommandBuffer(slot->upload_cmd, 0) != VK_SUCCESS) {
         return -1;
@@ -859,35 +904,19 @@ int renderer_upload_video_nv12(Renderer* ren, uint8_t* y_plane, int y_linesize, 
         }
     }
 
-    uint32_t slot_index = ren->next_slot;
-    ren->next_slot = (ren->next_slot + 1) % VIDEO_UPLOAD_SLOTS;
+    uint32_t slot_index = 0;
+    int slot_status = acquire_upload_slot(ren, &slot_index);
+    if (slot_status != 0) {
+        return slot_status > 0 ? 1 : -1;
+    }
 
     RendererVideoSlot* slot = &ren->video_slots[slot_index];
 
-    if (vkWaitForFences(app->device, 1, &slot->upload_fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+    if (slot->staging_mapped == NULL || slot->uv_staging_mapped == NULL) {
         return -1;
     }
-    if (vkResetFences(app->device, 1, &slot->upload_fence) != VK_SUCCESS) {
-        return -1;
-    }
-
-    void* mapped_y;
-    if (vkMapMemory(app->device, slot->staging_memory, 0, y_row_size * (size_t)height, 0, &mapped_y) != VK_SUCCESS) {
-        return -1;
-    }
-    for (int y = 0; y < height; y++) {
-        memcpy((uint8_t*)mapped_y + ((size_t)y * y_row_size), y_plane + ((size_t)y * (size_t)y_linesize), y_row_size);
-    }
-    vkUnmapMemory(app->device, slot->staging_memory);
-
-    void* mapped_uv;
-    if (vkMapMemory(app->device, slot->uv_staging_memory, 0, uv_row_size * (size_t)chroma_height, 0, &mapped_uv) != VK_SUCCESS) {
-        return -1;
-    }
-    for (int y = 0; y < chroma_height; y++) {
-        memcpy((uint8_t*)mapped_uv + ((size_t)y * uv_row_size), uv_plane + ((size_t)y * (size_t)uv_linesize), uv_row_size);
-    }
-    vkUnmapMemory(app->device, slot->uv_staging_memory);
+    copy_plane_rows(slot->staging_mapped, y_row_size, y_plane, y_linesize, height);
+    copy_plane_rows(slot->uv_staging_mapped, uv_row_size, uv_plane, uv_linesize, chroma_height);
 
     if (vkResetCommandBuffer(slot->upload_cmd, 0) != VK_SUCCESS) {
         return -1;
@@ -1049,44 +1078,20 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
         }
     }
 
-    uint32_t slot_index = ren->next_slot;
-    ren->next_slot = (ren->next_slot + 1) % VIDEO_UPLOAD_SLOTS;
+    uint32_t slot_index = 0;
+    int slot_status = acquire_upload_slot(ren, &slot_index);
+    if (slot_status != 0) {
+        return slot_status > 0 ? 1 : -1;
+    }
 
     RendererVideoSlot* slot = &ren->video_slots[slot_index];
 
-    if (vkWaitForFences(app->device, 1, &slot->upload_fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+    if (slot->staging_mapped == NULL || slot->uv_staging_mapped == NULL || slot->v_staging_mapped == NULL) {
         return -1;
     }
-    if (vkResetFences(app->device, 1, &slot->upload_fence) != VK_SUCCESS) {
-        return -1;
-    }
-
-    void* mapped_y;
-    if (vkMapMemory(app->device, slot->staging_memory, 0, y_row_size * (size_t)height, 0, &mapped_y) != VK_SUCCESS) {
-        return -1;
-    }
-    for (int y = 0; y < height; y++) {
-        memcpy((uint8_t*)mapped_y + ((size_t)y * y_row_size), y_plane + ((size_t)y * (size_t)y_linesize), y_row_size);
-    }
-    vkUnmapMemory(app->device, slot->staging_memory);
-
-    void* mapped_u;
-    if (vkMapMemory(app->device, slot->uv_staging_memory, 0, u_row_size * (size_t)chroma_height, 0, &mapped_u) != VK_SUCCESS) {
-        return -1;
-    }
-    for (int y = 0; y < chroma_height; y++) {
-        memcpy((uint8_t*)mapped_u + ((size_t)y * u_row_size), u_plane + ((size_t)y * (size_t)u_linesize), u_row_size);
-    }
-    vkUnmapMemory(app->device, slot->uv_staging_memory);
-
-    void* mapped_v;
-    if (vkMapMemory(app->device, slot->v_staging_memory, 0, v_row_size * (size_t)chroma_height, 0, &mapped_v) != VK_SUCCESS) {
-        return -1;
-    }
-    for (int y = 0; y < chroma_height; y++) {
-        memcpy((uint8_t*)mapped_v + ((size_t)y * v_row_size), v_plane + ((size_t)y * (size_t)v_linesize), v_row_size);
-    }
-    vkUnmapMemory(app->device, slot->v_staging_memory);
+    copy_plane_rows(slot->staging_mapped, y_row_size, y_plane, y_linesize, height);
+    copy_plane_rows(slot->uv_staging_mapped, u_row_size, u_plane, u_linesize, chroma_height);
+    copy_plane_rows(slot->v_staging_mapped, v_row_size, v_plane, v_linesize, chroma_height);
 
     if (vkResetCommandBuffer(slot->upload_cmd, 0) != VK_SUCCESS) {
         return -1;

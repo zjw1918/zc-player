@@ -10,6 +10,8 @@ const PLAYING_STATE = switch (@typeInfo(c.PlayerState)) {
     else => @as(c.PlayerState, @intCast(c.PLAYER_STATE_PLAYING)),
 };
 
+const render_late_drop_tolerance = 0.05;
+
 fn frameCapacity() c_int {
     return c.VIDEO_FRAME_QUEUE_CAPACITY;
 }
@@ -148,6 +150,31 @@ fn queuePopToUploadLocked(pipeline: *c.VideoPipeline) c_int {
         _ = c.SDL_SignalCondition(pipeline.can_push);
     }
     return 0;
+}
+
+fn dropLateQueuedFramesLocked(pipeline: *c.VideoPipeline, render_clock: f64, tolerance: f64) c_int {
+    if (pipeline.count <= 1) {
+        return 0;
+    }
+
+    var dropped: c_int = 0;
+    while (pipeline.count > 1) {
+        const head_idx: usize = @intCast(pipeline.head);
+        const frame = &pipeline.frames[head_idx];
+        if (frame.pts + tolerance >= render_clock) {
+            break;
+        }
+
+        pipeline.head = @mod(pipeline.head + 1, frameCapacity());
+        pipeline.count -= 1;
+        dropped += 1;
+    }
+
+    if (dropped > 0 and pipeline.can_push != null) {
+        _ = c.SDL_SignalCondition(pipeline.can_push);
+    }
+
+    return dropped;
 }
 
 fn fallbackVideoClock(pipeline: *c.VideoPipeline, frame_pts: f64) f64 {
@@ -462,6 +489,9 @@ pub export fn video_pipeline_get_frame_for_render(
         if (p.queue_mutex != null) {
             _ = c.SDL_LockMutex(p.queue_mutex);
             if (p.count > 0) {
+                if (master_clock >= 0.0) {
+                    _ = dropLateQueuedFramesLocked(p, master_clock, render_late_drop_tolerance);
+                }
                 _ = queuePopToUploadLocked(p);
             }
             _ = c.SDL_UnlockMutex(p.queue_mutex);
@@ -570,4 +600,19 @@ test "queuePopToUploadLocked preserves multi-plane pending metadata" {
     try std.testing.expect(pipeline.upload_planes[1] == uv_ptr);
     try std.testing.expect(pipeline.frames[0].planes[0] == upload_y_ptr);
     try std.testing.expect(pipeline.frames[0].planes[1] == upload_uv_ptr);
+}
+
+test "dropLateQueuedFramesLocked keeps newest frame when queue lags" {
+    var pipeline: c.VideoPipeline = std.mem.zeroes(c.VideoPipeline);
+    pipeline.count = 3;
+    pipeline.head = 0;
+    pipeline.tail = 3;
+    pipeline.frames[0].pts = 1.0;
+    pipeline.frames[1].pts = 1.03;
+    pipeline.frames[2].pts = 1.20;
+
+    const dropped = dropLateQueuedFramesLocked(&pipeline, 1.18, 0.04);
+    try std.testing.expectEqual(@as(c_int, 2), dropped);
+    try std.testing.expectEqual(@as(c_int, 1), pipeline.count);
+    try std.testing.expectEqual(@as(c_int, 2), pipeline.head);
 }

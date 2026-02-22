@@ -42,6 +42,25 @@ pub const VideoInterop = struct {
         return interop;
     }
 
+    pub fn parseSelectionMode(value: ?[]const u8) SelectionMode {
+        const text = value orelse return .auto;
+        if (std.ascii.eqlIgnoreCase(text, "software")) {
+            return .force_software;
+        }
+        if (std.ascii.eqlIgnoreCase(text, "zero_copy")) {
+            return .force_zero_copy;
+        }
+        return .auto;
+    }
+
+    pub fn selectionModeFromEnvironment() SelectionMode {
+        const value = std.posix.getenv("ZC_VIDEO_BACKEND_MODE");
+        if (value == null) {
+            return .auto;
+        }
+        return parseSelectionMode(std.mem.sliceTo(value.?, 0));
+    }
+
     pub fn deinit(self: *VideoInterop) void {
         self.software.deinit();
     }
@@ -78,4 +97,12 @@ test "video interop defaults to software backend" {
     try std.testing.expectEqual(BackendKind.software_upload, interop.kind);
     const caps = interop.capabilities();
     try std.testing.expect(!caps.zero_copy);
+}
+
+test "selection parser maps known backend values" {
+    try std.testing.expectEqual(SelectionMode.auto, VideoInterop.parseSelectionMode(null));
+    try std.testing.expectEqual(SelectionMode.auto, VideoInterop.parseSelectionMode("auto"));
+    try std.testing.expectEqual(SelectionMode.force_software, VideoInterop.parseSelectionMode("software"));
+    try std.testing.expectEqual(SelectionMode.force_zero_copy, VideoInterop.parseSelectionMode("zero_copy"));
+    try std.testing.expectEqual(SelectionMode.auto, VideoInterop.parseSelectionMode("unknown"));
 }

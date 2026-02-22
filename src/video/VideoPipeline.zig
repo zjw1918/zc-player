@@ -27,7 +27,7 @@ pub const VideoPipeline = struct {
             return error.InitFailed;
         }
         self.initialized = true;
-        self.interop = VideoInterop.init(.auto);
+        self.interop = VideoInterop.init(VideoInterop.selectionModeFromEnvironment());
     }
 
     pub fn start(self: *VideoPipeline) !void {

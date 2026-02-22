@@ -18,6 +18,9 @@ src/shaders/*.spv
 # Runtime/local config
 imgui.ini
 
+# Local worktrees
+.worktrees/
+
 # Generic build artifacts
 *.o
 *.obj

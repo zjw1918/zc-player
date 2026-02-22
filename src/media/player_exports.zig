@@ -8,21 +8,21 @@ const c = @cImport({
 fn stateFromInt(value: c_int) c.PlayerState {
     return switch (@typeInfo(c.PlayerState)) {
         .@"enum" => @enumFromInt(value),
-        else => @as(c.PlayerState, @intCast(value))
+        else => @as(c.PlayerState, @intCast(value)),
     };
 }
 
 fn stateToInt(value: c.PlayerState) c_int {
     return switch (@typeInfo(c.PlayerState)) {
         .@"enum" => @as(c_int, @intCast(@intFromEnum(value))),
-        else => @as(c_int, @intCast(value))
+        else => @as(c_int, @intCast(value)),
     };
 }
 
 fn commandFromInt(value: c_int) c.PlayerCommand {
     return switch (@typeInfo(c.PlayerCommand)) {
         .@"enum" => @enumFromInt(value),
-        else => @as(c.PlayerCommand, @intCast(value))
+        else => @as(c.PlayerCommand, @intCast(value)),
     };
 }
 
@@ -41,7 +41,7 @@ fn normalizeState(value: c_int) c.PlayerState {
         c.PLAYER_STATE_PLAYING => STATE_PLAYING,
         c.PLAYER_STATE_PAUSED => STATE_PAUSED,
         c.PLAYER_STATE_BUFFERING => STATE_BUFFERING,
-        else => STATE_STOPPED
+        else => STATE_STOPPED,
     };
 }
 
@@ -78,7 +78,7 @@ fn canTransition(player: ?*c.Player, from: c.PlayerState, to: c.PlayerState) boo
         STATE_PLAYING => to == STATE_PLAYING or to == STATE_PAUSED or to == STATE_STOPPED or to == STATE_BUFFERING,
         STATE_PAUSED => to == STATE_PAUSED or to == STATE_PLAYING or to == STATE_STOPPED or to == STATE_BUFFERING,
         STATE_BUFFERING => to == STATE_BUFFERING or to == STATE_PLAYING or to == STATE_PAUSED or to == STATE_STOPPED,
-        else => false
+        else => false,
     };
 }
 
@@ -251,7 +251,7 @@ pub export fn player_command(player: ?*c.Player, command: c.PlayerCommand) c_int
             }
             break :blk transition(player, STATE_PLAYING);
         },
-        else => -1
+        else => -1,
     };
 }
 
@@ -503,4 +503,12 @@ pub export fn player_get_audio_pts(player: ?*c.Player) f64 {
     }
 
     return player.?.audio_decoder.pts;
+}
+
+pub export fn player_stop_demuxer(player: ?*c.Player) void {
+    if (player == null) {
+        return;
+    }
+
+    c.demuxer_stop(&player.?.demuxer);
 }

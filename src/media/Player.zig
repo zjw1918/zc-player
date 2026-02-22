@@ -101,6 +101,10 @@ pub const Player = struct {
         return c.player_apply_seek(&self.handle) == 0;
     }
 
+    pub fn stopDemuxer(self: *Player) void {
+        c.player_stop_demuxer(&self.handle);
+    }
+
     pub fn setCurrentTime(self: *Player, time: f64) void {
         self.handle.current_time = time;
     }

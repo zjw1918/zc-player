@@ -69,6 +69,7 @@ int player_get_audio_channels(Player* player);
 int player_decode_audio(Player* player);
 int player_get_audio_samples(Player* player, uint8_t** data, int* nb_samples);
 double player_get_audio_pts(Player* player);
+void player_stop_demuxer(Player* player);
 
 #ifdef __cplusplus
 }

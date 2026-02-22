@@ -52,6 +52,15 @@ int video_pipeline_start(VideoPipeline* pipeline);
 void video_pipeline_stop(VideoPipeline* pipeline);
 void video_pipeline_reset(VideoPipeline* pipeline);
 void video_pipeline_destroy(VideoPipeline* pipeline);
-int video_pipeline_get_frame_for_render(VideoPipeline* pipeline, double master_clock, uint8_t** data, int* width, int* height, int* linesize);
+int video_pipeline_get_frame_for_render(
+    VideoPipeline* pipeline,
+    double master_clock,
+    uint8_t** planes,
+    int* width,
+    int* height,
+    int* linesizes,
+    int* plane_count,
+    int* format
+);
 
 #endif

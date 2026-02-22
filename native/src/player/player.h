@@ -62,6 +62,7 @@ double player_get_playback_speed(Player* player);
 double player_get_time(Player* player);
 int player_decode_frame(Player* player);
 int player_get_video_frame(Player* player, uint8_t** data, int* linesize);
+int player_get_video_format(Player* player);
 double player_get_video_pts(Player* player);
 int player_has_audio(Player* player);
 int player_get_audio_sample_rate(Player* player);

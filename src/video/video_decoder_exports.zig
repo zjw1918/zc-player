@@ -197,6 +197,14 @@ fn sourceFrameForScale(decoder: *c.VideoDecoder) ?*c.AVFrame {
     return decoder.frame;
 }
 
+fn decodeFormatTag(pix_fmt: c.AVPixelFormat) c_int {
+    return switch (pix_fmt) {
+        c.AV_PIX_FMT_YUV420P => c.VIDEO_FRAME_FORMAT_YUV420P,
+        c.AV_PIX_FMT_NV12 => c.VIDEO_FRAME_FORMAT_NV12,
+        else => c.VIDEO_FRAME_FORMAT_RGBA,
+    };
+}
+
 pub export fn video_decoder_init(dec: ?*c.VideoDecoder, stream: ?*c.AVStream) c_int {
     if (dec == null) {
         return -1;
@@ -449,6 +457,16 @@ pub export fn video_decoder_get_image(dec: ?*c.VideoDecoder, data: [*c][*c]u8, l
     return 0;
 }
 
+pub export fn video_decoder_get_format(dec: ?*c.VideoDecoder) c_int {
+    if (dec == null) {
+        return c.VIDEO_FRAME_FORMAT_RGBA;
+    }
+
+    const src_frame = sourceFrameForScale(dec.?) orelse return c.VIDEO_FRAME_FORMAT_RGBA;
+    const pix_fmt: c.AVPixelFormat = src_frame.*.format;
+    return decodeFormatTag(pix_fmt);
+}
+
 test "chooseOutputPixelFormat prefers requested format" {
     const formats = [_]c.AVPixelFormat{
         c.AV_PIX_FMT_YUV420P,
@@ -467,4 +485,14 @@ test "chooseOutputPixelFormat falls back to first offered format" {
     };
 
     try std.testing.expectEqual(c.AV_PIX_FMT_YUV420P, chooseOutputPixelFormat(c.AV_PIX_FMT_RGBA, &formats));
+}
+
+test "decodeFormatTag maps yuv420p and nv12" {
+    try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_YUV420P), decodeFormatTag(c.AV_PIX_FMT_YUV420P));
+    try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_NV12), decodeFormatTag(c.AV_PIX_FMT_NV12));
+}
+
+test "decodeFormatTag defaults unknown formats to rgba" {
+    try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_RGBA), decodeFormatTag(c.AV_PIX_FMT_RGBA));
+    try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_RGBA), decodeFormatTag(c.AV_PIX_FMT_GRAY8));
 }

@@ -113,6 +113,10 @@ pub const Player = struct {
         return c.player_get_video_pts(&self.handle);
     }
 
+    pub fn videoFormat(self: *Player) c_int {
+        return c.player_get_video_format(&self.handle);
+    }
+
     pub fn clampCurrentTimeToDuration(self: *Player) void {
         if (self.handle.duration > 0.0 and self.handle.current_time > self.handle.duration) {
             self.handle.current_time = self.handle.duration;

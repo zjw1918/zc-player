@@ -431,6 +431,14 @@ pub export fn player_get_video_frame(player: ?*c.Player, data: [*c][*c]u8, lines
     return c.video_decoder_get_image(&player.?.decoder, data, linesize);
 }
 
+pub export fn player_get_video_format(player: ?*c.Player) c_int {
+    if (player == null) {
+        return c.VIDEO_FRAME_FORMAT_RGBA;
+    }
+
+    return c.video_decoder_get_format(&player.?.decoder);
+}
+
 pub export fn player_get_video_pts(player: ?*c.Player) f64 {
     if (player == null) {
         return 0.0;

@@ -31,10 +31,17 @@ typedef struct {
     int buffer_size;
 } VideoDecoder;
 
+typedef enum {
+    VIDEO_FRAME_FORMAT_RGBA = 0,
+    VIDEO_FRAME_FORMAT_YUV420P = 1,
+    VIDEO_FRAME_FORMAT_NV12 = 2,
+} VideoFrameFormat;
+
 int video_decoder_init(VideoDecoder* dec, AVStream* stream);
 void video_decoder_destroy(VideoDecoder* dec);
 void video_decoder_flush(VideoDecoder* dec);
 int video_decoder_decode_frame(VideoDecoder* dec, struct Demuxer* demuxer);
 int video_decoder_get_image(VideoDecoder* dec, uint8_t** data, int* linesize);
+int video_decoder_get_format(VideoDecoder* dec);
 
 #endif

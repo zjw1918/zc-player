@@ -5,6 +5,7 @@
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/hwcontext.h>
 #include <stdint.h>
 
 struct Demuxer;
@@ -15,14 +16,19 @@ typedef struct {
     struct SwsContext* sws_ctx;
     AVPacket* packet;
     AVFrame* frame;
+    AVFrame* sw_frame;
     int width;
     int height;
     double pts;
     int eof;
     int sent_eof;
+    enum AVPixelFormat sws_src_fmt;
+    enum AVPixelFormat hw_pix_fmt;
+    int hw_enabled;
     uint8_t* temp_data[4];
     int temp_linesize[4];
     uint8_t* buffer;
+    int buffer_size;
 } VideoDecoder;
 
 int video_decoder_init(VideoDecoder* dec, AVStream* stream);

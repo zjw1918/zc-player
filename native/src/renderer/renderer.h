@@ -70,7 +70,6 @@ typedef struct {
     int video_width;
     int video_height;
     int video_format;
-    int true_zero_copy_uv_swap;
     int has_video;
 } Renderer;
 

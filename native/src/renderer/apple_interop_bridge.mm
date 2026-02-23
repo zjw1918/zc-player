@@ -26,8 +26,8 @@ static int ensure_cache() {
     return result == kCVReturnSuccess ? 0 : -1;
 }
 
-uint64_t apple_interop_create_mtl_texture_from_avframe(uint64_t avframe_token, int plane, int* out_width, int* out_height) {
-    if (avframe_token == 0 || out_width == NULL || out_height == NULL) {
+uint64_t apple_interop_create_mtl_texture_from_avframe(uint64_t avframe_token, int plane, int* out_width, int* out_height, int* out_pixel_format) {
+    if (avframe_token == 0 || out_width == NULL || out_height == NULL || out_pixel_format == NULL) {
         return 0;
     }
 
@@ -76,6 +76,7 @@ uint64_t apple_interop_create_mtl_texture_from_avframe(uint64_t avframe_token, i
 
     *out_width = (int)plane_width;
     *out_height = (int)plane_height;
+    *out_pixel_format = (int)[texture pixelFormat];
     return (uint64_t)(uintptr_t)texture;
 }
 
@@ -88,20 +89,41 @@ void apple_interop_release_mtl_texture(uint64_t texture_token) {
     [texture release];
 }
 
+int apple_interop_validate_nv12_texture_formats(uint64_t y_texture_token, uint64_t uv_texture_token) {
+    if (y_texture_token == 0 || uv_texture_token == 0) {
+        return 0;
+    }
+
+    id<MTLTexture> y_texture = (id<MTLTexture>)(uintptr_t)y_texture_token;
+    id<MTLTexture> uv_texture = (id<MTLTexture>)(uintptr_t)uv_texture_token;
+    if (y_texture == nil || uv_texture == nil) {
+        return 0;
+    }
+
+    return (y_texture.pixelFormat == MTLPixelFormatR8Unorm && uv_texture.pixelFormat == MTLPixelFormatRG8Unorm) ? 1 : 0;
+}
+
 #else
 
 #include "renderer/apple_interop_bridge.h"
 
-uint64_t apple_interop_create_mtl_texture_from_avframe(uint64_t avframe_token, int plane, int* out_width, int* out_height) {
+uint64_t apple_interop_create_mtl_texture_from_avframe(uint64_t avframe_token, int plane, int* out_width, int* out_height, int* out_pixel_format) {
     (void)avframe_token;
     (void)plane;
     (void)out_width;
     (void)out_height;
+    (void)out_pixel_format;
     return 0;
 }
 
 void apple_interop_release_mtl_texture(uint64_t texture_token) {
     (void)texture_token;
+}
+
+int apple_interop_validate_nv12_texture_formats(uint64_t y_texture_token, uint64_t uv_texture_token) {
+    (void)y_texture_token;
+    (void)uv_texture_token;
+    return 0;
 }
 
 #endif

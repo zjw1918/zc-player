@@ -12,7 +12,6 @@
 #define VIDEO_FORMAT_RGBA 0
 #define VIDEO_FORMAT_NV12 1
 #define VIDEO_FORMAT_YUV420P 2
-#define VIDEO_FORMAT_NV12_TRUE_SWAP 3
 
 typedef struct {
     int mode;
@@ -370,7 +369,7 @@ static int create_imported_metal_texture_image(
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .initialLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
 
     if (vkCreateImage(app->device, &image_info, NULL, image) != VK_SUCCESS) {
@@ -458,6 +457,65 @@ static int create_imported_metal_texture_image(
     return 0;
 }
 
+static int transition_imported_image_to_general(Renderer* ren, RendererVideoSlot* slot, VkImage image) {
+    if (ren == NULL || slot == NULL || image == VK_NULL_HANDLE) {
+        return -1;
+    }
+
+    if (vkResetCommandBuffer(slot->upload_cmd, 0) != VK_SUCCESS) {
+        return -1;
+    }
+
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    if (vkBeginCommandBuffer(slot->upload_cmd, &begin_info) != VK_SUCCESS) {
+        return -1;
+    }
+
+    VkImageMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+    };
+    vkCmdPipelineBarrier(slot->upload_cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
+
+    if (vkEndCommandBuffer(slot->upload_cmd) != VK_SUCCESS) {
+        return -1;
+    }
+
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &slot->upload_cmd,
+    };
+    if (vkQueueSubmit(ren->app->graphics_queue, 1, &submit_info, slot->upload_fence) != VK_SUCCESS) {
+        return -1;
+    }
+
+    if (vkWaitForFences(ren->app->device, 1, &slot->upload_fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+        return -1;
+    }
+    if (vkResetFences(ren->app->device, 1, &slot->upload_fence) != VK_SUCCESS) {
+        return -1;
+    }
+
+    return 0;
+}
+
 static int import_video_slot_resources_nv12(Renderer* ren, RendererVideoSlot* slot, uint64_t y_texture_token, uint64_t uv_texture_token, int width, int height, int chroma_width, int chroma_height) {
     vkDeviceWaitIdle(ren->app->device);
     destroy_video_slot_resources(ren, slot);
@@ -466,6 +524,11 @@ static int import_video_slot_resources_nv12(Renderer* ren, RendererVideoSlot* sl
         return -1;
     }
     if (create_imported_metal_texture_image(ren->app, uv_texture_token, chroma_width, chroma_height, VK_FORMAT_R8G8_UNORM, &slot->uv_image, &slot->uv_image_memory, &slot->uv_image_view) != 0) {
+        destroy_video_slot_resources(ren, slot);
+        return -1;
+    }
+
+    if (transition_imported_image_to_general(ren, slot, slot->image) != 0 || transition_imported_image_to_general(ren, slot, slot->uv_image) != 0) {
         destroy_video_slot_resources(ren, slot);
         return -1;
     }
@@ -858,7 +921,6 @@ int renderer_init(Renderer* ren, App* app) {
     ren->video_width = 0;
     ren->video_height = 0;
     ren->video_format = VIDEO_FORMAT_RGBA;
-    ren->true_zero_copy_uv_swap = 0;
     return 0;
 
 fail:
@@ -1047,7 +1109,6 @@ int renderer_upload_video(Renderer* ren, uint8_t* data, int width, int height, i
 
     slot->image_initialized = 1;
     ren->active_slot = slot_index;
-    ren->true_zero_copy_uv_swap = 0;
     ren->has_video = 1;
     return 0;
 }
@@ -1221,7 +1282,6 @@ int renderer_upload_video_nv12(Renderer* ren, uint8_t* y_plane, int y_linesize, 
     slot->image_initialized = 1;
     slot->yuv_initialized = 1;
     ren->active_slot = slot_index;
-    ren->true_zero_copy_uv_swap = 0;
     ren->has_video = 1;
     return 0;
 }
@@ -1446,7 +1506,6 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
     slot->image_initialized = 1;
     slot->yuv_initialized = 1;
     ren->active_slot = slot_index;
-    ren->true_zero_copy_uv_swap = 0;
     ren->has_video = 1;
     return 0;
 }
@@ -1522,14 +1581,36 @@ int renderer_submit_true_zero_copy_handle(Renderer* ren, uint64_t handle_token, 
     int uv_width = 0;
     int uv_height = 0;
 
-    uint64_t y_texture_token = apple_interop_create_mtl_texture_from_avframe(frame->gpu_token, 0, &y_width, &y_height);
+    // Runtime verification for Task 4:
+    //   ZC_VIDEO_BACKEND_MODE=zero_copy ZC_EXPERIMENTAL_TRUE_ZERO_COPY=1 zig build run -- '/Volumes/collections/艾尔登法环/meilinna1.mp4'
+    // Expected on success: no Vulkan validation errors, no green/magenta tint, stable playback.
+    int y_pixel_format = 0;
+    int uv_pixel_format = 0;
+    uint64_t y_texture_token = apple_interop_create_mtl_texture_from_avframe(frame->gpu_token, 0, &y_width, &y_height, &y_pixel_format);
     if (y_texture_token == 0) {
         return -1;
     }
 
-    uint64_t uv_texture_token = apple_interop_create_mtl_texture_from_avframe(frame->gpu_token, 1, &uv_width, &uv_height);
+    uint64_t uv_texture_token = apple_interop_create_mtl_texture_from_avframe(frame->gpu_token, 1, &uv_width, &uv_height, &uv_pixel_format);
     if (uv_texture_token == 0) {
         apple_interop_release_mtl_texture(y_texture_token);
+        return -1;
+    }
+
+    const int expected_uv_width = (width + 1) / 2;
+    const int expected_uv_height = (height + 1) / 2;
+    if (y_width != width || y_height != height || uv_width != expected_uv_width || uv_height != expected_uv_height) {
+        fprintf(stderr, "true-zero-copy import rejected: plane dimensions mismatch y=%dx%d uv=%dx%d expected y=%dx%d uv=%dx%d\n",
+            y_width, y_height, uv_width, uv_height, width, height, expected_uv_width, expected_uv_height);
+        apple_interop_release_mtl_texture(y_texture_token);
+        apple_interop_release_mtl_texture(uv_texture_token);
+        return -1;
+    }
+
+    if (!apple_interop_validate_nv12_texture_formats(y_texture_token, uv_texture_token)) {
+        fprintf(stderr, "true-zero-copy import rejected: unsupported NV12 texture channel format (y=%d uv=%d); UV swap workaround removed\n", y_pixel_format, uv_pixel_format);
+        apple_interop_release_mtl_texture(y_texture_token);
+        apple_interop_release_mtl_texture(uv_texture_token);
         return -1;
     }
 
@@ -1562,7 +1643,6 @@ int renderer_submit_true_zero_copy_handle(Renderer* ren, uint64_t handle_token, 
     ren->video_width = width;
     ren->video_height = height;
     ren->video_format = VIDEO_FORMAT_NV12;
-    ren->true_zero_copy_uv_swap = 1;
     ren->active_slot = slot_index;
     ren->has_video = 1;
     return 0;
@@ -1633,7 +1713,7 @@ void renderer_render(Renderer* ren) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ren->pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ren->pipeline_layout, 0, 1, &slot->descriptor_set, 0, NULL);
     VideoPushConstants push_constants = {
-        .mode = ren->true_zero_copy_uv_swap ? VIDEO_FORMAT_NV12_TRUE_SWAP : ren->video_format,
+        .mode = ren->video_format,
     };
     vkCmdPushConstants(cmd, ren->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push_constants), &push_constants);
     vkCmdDraw(cmd, 6, 1, 0, 0);

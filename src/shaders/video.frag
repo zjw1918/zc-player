@@ -30,10 +30,6 @@ void main() {
         float y = texture(video_texture_y, uv).r;
         vec2 uv_sample = texture(video_texture_uv_or_u, uv).rg;
         outColor = vec4(yuv_to_rgb(y, uv_sample.r, uv_sample.g), 1.0);
-    } else if (video_pc.mode == 3) {
-        float y = texture(video_texture_y, uv).r;
-        vec2 uv_sample = texture(video_texture_uv_or_u, uv).rg;
-        outColor = vec4(yuv_to_rgb(y, uv_sample.g, uv_sample.r), 1.0);
     } else if (video_pc.mode == 2) {
         float y = texture(video_texture_y, uv).r;
         float u = texture(video_texture_uv_or_u, uv).r;

@@ -5,6 +5,9 @@ const PlaybackState = SnapshotMod.PlaybackState;
 const VideoBackendStatus = SnapshotMod.VideoBackendStatus;
 const VideoFallbackReason = SnapshotMod.VideoFallbackReason;
 const gui = @import("../ffi/gui.zig").c;
+const libc = @cImport({
+    @cInclude("stdlib.h");
+});
 
 const UploadPath = enum {
     rgba,
@@ -289,8 +292,8 @@ pub const App = struct {
                                 },
                             }
 
-                            if (gpu_payload) {
-                                self.engine.reportTrueZeroCopySubmitResult(path == .true_zero_copy and submit_result == 0);
+                            if (gpu_payload and path == .true_zero_copy) {
+                                self.engine.reportTrueZeroCopySubmitResult(submit_result == 0);
                             }
                         },
                     }
@@ -361,6 +364,13 @@ test "selectInteropSubmitPath chooses true-zero-copy when active" {
     try std.testing.expectEqual(InteropSubmitPath.true_zero_copy, selectInteropSubmitPath(.true_zero_copy));
     try std.testing.expectEqual(InteropSubmitPath.interop_handle, selectInteropSubmitPath(.interop_handle));
     try std.testing.expectEqual(InteropSubmitPath.interop_handle, selectInteropSubmitPath(.software));
+}
+
+test "selectInteropSubmitPath forces interop when env override set" {
+    try std.testing.expectEqual(@as(c_int, 0), libc.setenv("ZC_FORCE_INTEROP_HANDLE", "1", 1));
+    defer _ = libc.unsetenv("ZC_FORCE_INTEROP_HANDLE");
+
+    try std.testing.expectEqual(InteropSubmitPath.interop_handle, selectInteropSubmitPath(.true_zero_copy));
 }
 
 test "isGpuInteropPayload detects gpu-tagged interop frames" {

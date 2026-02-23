@@ -1,6 +1,9 @@
 const std = @import("std");
 const SoftwareUploadBackendMod = @import("SoftwareUploadBackend.zig");
 const MacVideoToolboxBackendMod = @import("MacVideoToolboxBackend.zig");
+const libc = @cImport({
+    @cInclude("stdlib.h");
+});
 
 pub const BackendKind = enum {
     software_upload,
@@ -155,18 +158,24 @@ pub const VideoInterop = struct {
         return value.?[0] != 0 and value.?[0] != '0';
     }
 
+    fn forceInteropHandleEnabled() bool {
+        if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZC_FORCE_INTEROP_HANDLE")) |value| {
+            defer std.heap.page_allocator.free(value);
+            return std.mem.eql(u8, value, "1");
+        } else |_| {
+            return false;
+        }
+    }
+
     pub fn runtimeStatus(self: *const VideoInterop) RuntimeStatus {
         if (self.force_zero_copy_blocked) {
             return .force_zero_copy_blocked;
         }
 
         if (self.kind == .macos_videotoolbox) {
-            if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZC_FORCE_INTEROP_HANDLE")) |value| {
-                defer std.heap.page_allocator.free(value);
-                if (std.mem.eql(u8, value, "1")) {
-                    return .interop_handle;
-                }
-            } else |_| {}
+            if (forceInteropHandleEnabled()) {
+                return .interop_handle;
+            }
 
             if (self.force_zero_copy_blocked) {
                 return .interop_handle;
@@ -181,11 +190,17 @@ pub const VideoInterop = struct {
         if (self.force_zero_copy_blocked) {
             return .unsupported_mode;
         }
+        if (forceInteropHandleEnabled() and self.last_fallback_reason == .import_failure) {
+            return .none;
+        }
         return self.last_fallback_reason;
     }
 
     pub fn reportTrueZeroCopySubmitResult(self: *VideoInterop, success: bool) void {
         if (self.kind != .macos_videotoolbox) {
+            return;
+        }
+        if (forceInteropHandleEnabled()) {
             return;
         }
 
@@ -418,4 +433,38 @@ test "true-zero-copy submit failure suppresses true status" {
     interop.reportTrueZeroCopySubmitResult(false);
     try std.testing.expectEqual(RuntimeStatus.interop_handle, interop.runtimeStatus());
     try std.testing.expectEqual(FallbackReason.import_failure, interop.fallbackReason());
+}
+
+test "true-zero-copy forced interop does not set import-failure fallback noise" {
+    var interop = VideoInterop{
+        .kind = .macos_videotoolbox,
+        .mode = .auto,
+        .software = .{},
+        .mac_backend = .{},
+        .fallback_switches = 0,
+        .consecutive_failures = 0,
+        .failure_threshold = 3,
+        .submit_success_count = 0,
+        .submit_failure_count = 0,
+        .acquire_failure_count = 0,
+        .true_submit_success_count = 0,
+        .true_submit_failure_count = 0,
+        .force_zero_copy_blocked = false,
+        .last_fallback_reason = .none,
+        .true_zero_copy_suppressed = false,
+    };
+
+    interop.mac_backend.true_zero_copy_capable = true;
+    interop.mac_backend.hw_frame_streak = 12;
+    interop.mac_backend.last_frame_format = 2;
+    interop.mac_backend.host_frame.payload_kind = 1;
+    interop.mac_backend.host_frame.gpu_token = 0x1;
+
+    try std.testing.expectEqual(@as(c_int, 0), libc.setenv("ZC_FORCE_INTEROP_HANDLE", "1", 1));
+    defer _ = libc.unsetenv("ZC_FORCE_INTEROP_HANDLE");
+
+    try std.testing.expectEqual(RuntimeStatus.interop_handle, interop.runtimeStatus());
+    interop.reportTrueZeroCopySubmitResult(false);
+    try std.testing.expectEqual(RuntimeStatus.interop_handle, interop.runtimeStatus());
+    try std.testing.expectEqual(FallbackReason.none, interop.fallbackReason());
 }

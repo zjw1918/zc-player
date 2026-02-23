@@ -1510,7 +1510,7 @@ int renderer_submit_true_zero_copy_handle(Renderer* ren, uint64_t handle_token, 
         return -1;
     }
 
-    if (format != VIDEO_FRAME_FORMAT_NV12 || frame->plane_count < 2 || frame->planes[0] == NULL || frame->planes[1] == NULL) {
+    if (format != VIDEO_FRAME_FORMAT_NV12) {
         return -1;
     }
 

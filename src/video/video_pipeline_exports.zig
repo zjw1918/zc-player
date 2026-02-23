@@ -51,6 +51,46 @@ fn planeGeometry(format: c_int, width: c_int, height: c_int, plane_idx: c_int) ?
     };
 }
 
+fn envFlagEnabled(value: ?[]const u8) bool {
+    const text = value orelse return false;
+    return text.len > 0 and text[0] != '0';
+}
+
+fn backendModeAllowsZeroCopy(mode: ?[]const u8) bool {
+    const text = mode orelse return true;
+    return !std.ascii.eqlIgnoreCase(text, "software");
+}
+
+fn truePathCandidateMode(
+    source_hw: c_int,
+    gpu_token: u64,
+    backend_mode: ?[]const u8,
+    true_zero_copy_flag: ?[]const u8,
+    forced_interop_flag: ?[]const u8,
+) bool {
+    if (source_hw == 0 or gpu_token == 0) {
+        return false;
+    }
+
+    if (!backendModeAllowsZeroCopy(backend_mode)) {
+        return false;
+    }
+
+    if (!envFlagEnabled(true_zero_copy_flag)) {
+        return false;
+    }
+
+    return !envFlagEnabled(forced_interop_flag);
+}
+
+fn decodeShouldSkipPlaneExtraction(source_hw: c_int, gpu_token: u64) bool {
+    const backend_mode = if (std.posix.getenv("ZC_VIDEO_BACKEND_MODE")) |value| std.mem.sliceTo(value, 0) else null;
+    const true_zero_copy_flag = if (std.posix.getenv("ZC_EXPERIMENTAL_TRUE_ZERO_COPY")) |value| std.mem.sliceTo(value, 0) else null;
+    const forced_interop_flag = if (std.posix.getenv("ZC_FORCE_INTEROP_HANDLE")) |value| std.mem.sliceTo(value, 0) else null;
+
+    return truePathCandidateMode(source_hw, gpu_token, backend_mode, true_zero_copy_flag, forced_interop_flag);
+}
+
 fn queuePushLocked(
     pipeline: *c.VideoPipeline,
     src_planes: [*c][*c]u8,
@@ -68,7 +108,8 @@ fn queuePushLocked(
     }
 
     const expected_plane_count = planeCountForFormat(format);
-    if (src_plane_count < expected_plane_count) {
+    const gpu_only_frame = src_plane_count == 0 and source_hw != 0 and gpu_token != 0;
+    if (!gpu_only_frame and src_plane_count < expected_plane_count) {
         return -1;
     }
 
@@ -79,34 +120,36 @@ fn queuePushLocked(
         return -1;
     }
 
-    var plane_idx: c_int = 0;
-    while (plane_idx < expected_plane_count) : (plane_idx += 1) {
-        const geometry = planeGeometry(format, width, height, plane_idx) orelse return -1;
-        if (src_planes[@intCast(plane_idx)] == null or frame.planes[@intCast(plane_idx)] == null) {
-            return -1;
-        }
+    if (!gpu_only_frame) {
+        var plane_idx: c_int = 0;
+        while (plane_idx < expected_plane_count) : (plane_idx += 1) {
+            const geometry = planeGeometry(format, width, height, plane_idx) orelse return -1;
+            if (src_planes[@intCast(plane_idx)] == null or frame.planes[@intCast(plane_idx)] == null) {
+                return -1;
+            }
 
-        if (src_linesizes[@intCast(plane_idx)] < @as(c_int, @intCast(geometry.row_bytes)) or frame.linesizes[@intCast(plane_idx)] < @as(c_int, @intCast(geometry.row_bytes))) {
-            return -1;
-        }
+            if (src_linesizes[@intCast(plane_idx)] < @as(c_int, @intCast(geometry.row_bytes)) or frame.linesizes[@intCast(plane_idx)] < @as(c_int, @intCast(geometry.row_bytes))) {
+                return -1;
+            }
 
-        const src_base: [*]const u8 = @ptrCast(src_planes[@intCast(plane_idx)]);
-        const dst_base: [*]u8 = @ptrCast(frame.planes[@intCast(plane_idx)]);
-        const src_stride: usize = @intCast(src_linesizes[@intCast(plane_idx)]);
-        const dst_stride: usize = @intCast(frame.linesizes[@intCast(plane_idx)]);
+            const src_base: [*]const u8 = @ptrCast(src_planes[@intCast(plane_idx)]);
+            const dst_base: [*]u8 = @ptrCast(frame.planes[@intCast(plane_idx)]);
+            const src_stride: usize = @intCast(src_linesizes[@intCast(plane_idx)]);
+            const dst_stride: usize = @intCast(frame.linesizes[@intCast(plane_idx)]);
 
-        var row: usize = 0;
-        while (row < geometry.rows) : (row += 1) {
-            const dst_off = row * dst_stride;
-            const src_off = row * src_stride;
-            std.mem.copyForwards(u8, dst_base[dst_off .. dst_off + geometry.row_bytes], src_base[src_off .. src_off + geometry.row_bytes]);
+            var row: usize = 0;
+            while (row < geometry.rows) : (row += 1) {
+                const dst_off = row * dst_stride;
+                const src_off = row * src_stride;
+                std.mem.copyForwards(u8, dst_base[dst_off .. dst_off + geometry.row_bytes], src_base[src_off .. src_off + geometry.row_bytes]);
+            }
         }
     }
 
     frame.format = format;
     frame.source_hw = source_hw;
     frame.gpu_token = gpu_token;
-    frame.plane_count = expected_plane_count;
+    frame.plane_count = if (gpu_only_frame) 0 else expected_plane_count;
     frame.pts = pts;
     pipeline.tail = @mod(pipeline.tail + 1, frameCapacity());
     pipeline.count += 1;
@@ -233,22 +276,25 @@ fn decodeThreadMain(userdata: ?*anyopaque) callconv(.c) c_int {
         const format = c.player_get_video_format(pipeline.player);
         const source_hw = c.player_is_video_hw_enabled(pipeline.player);
         const gpu_token = c.player_get_video_hw_frame_token(pipeline.player);
-        const expected_plane_count = planeCountForFormat(format);
         var planes: [3][*c]u8 = .{ null, null, null };
         var linesizes: [3]c_int = .{ 0, 0, 0 };
         var plane_count: c_int = 0;
+        const gpu_only_frame = decodeShouldSkipPlaneExtraction(source_hw, gpu_token);
 
-        if (expected_plane_count > 1) {
-            if (c.player_get_video_planes(pipeline.player, &planes, &linesizes, &plane_count) != 0) {
-                c.SDL_Delay(1);
-                continue;
+        if (!gpu_only_frame) {
+            const expected_plane_count = planeCountForFormat(format);
+            if (expected_plane_count > 1) {
+                if (c.player_get_video_planes(pipeline.player, &planes, &linesizes, &plane_count) != 0) {
+                    c.SDL_Delay(1);
+                    continue;
+                }
+            } else {
+                if (c.player_get_video_frame(pipeline.player, &planes[0], &linesizes[0]) != 0) {
+                    c.SDL_Delay(1);
+                    continue;
+                }
+                plane_count = 1;
             }
-        } else {
-            if (c.player_get_video_frame(pipeline.player, &planes[0], &linesizes[0]) != 0) {
-                c.SDL_Delay(1);
-                continue;
-            }
-            plane_count = 1;
         }
 
         const pts = c.player_get_video_pts(pipeline.player);
@@ -635,4 +681,42 @@ test "dropLateQueuedFramesLocked keeps newest frame when queue lags" {
     try std.testing.expectEqual(@as(c_int, 2), dropped);
     try std.testing.expectEqual(@as(c_int, 1), pipeline.count);
     try std.testing.expectEqual(@as(c_int, 2), pipeline.head);
+}
+
+test "queuePushLocked accepts gpu-token frame with zero host planes" {
+    var pipeline: c.VideoPipeline = std.mem.zeroes(c.VideoPipeline);
+    var src_planes: [3][*c]u8 = .{ null, null, null };
+    var src_linesizes: [3]c_int = .{ 0, 0, 0 };
+
+    pipeline.frames[0].width = 1920;
+    pipeline.frames[0].height = 1080;
+
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        queuePushLocked(
+            &pipeline,
+            &src_planes,
+            &src_linesizes,
+            0,
+            1920,
+            1080,
+            c.VIDEO_FRAME_FORMAT_NV12,
+            1,
+            0xabc,
+            3.0,
+        ),
+    );
+    try std.testing.expectEqual(@as(c_int, 0), pipeline.frames[0].plane_count);
+    try std.testing.expectEqual(@as(c_int, 1), pipeline.frames[0].source_hw);
+    try std.testing.expectEqual(@as(u64, 0xabc), pipeline.frames[0].gpu_token);
+}
+
+test "truePathCandidateMode requires zero-copy gates and gpu token" {
+    try std.testing.expect(truePathCandidateMode(1, 0x1, "zero_copy", "1", null));
+    try std.testing.expect(truePathCandidateMode(1, 0x1, null, "1", null));
+    try std.testing.expect(!truePathCandidateMode(1, 0x1, "software", "1", null));
+    try std.testing.expect(!truePathCandidateMode(1, 0x1, "zero_copy", "0", null));
+    try std.testing.expect(!truePathCandidateMode(1, 0x1, "zero_copy", "1", "1"));
+    try std.testing.expect(!truePathCandidateMode(1, 0, "zero_copy", "1", null));
+    try std.testing.expect(!truePathCandidateMode(0, 0x1, "zero_copy", "1", null));
 }

@@ -11,6 +11,11 @@ const UploadPath = enum {
     yuv420p,
 };
 
+const InteropSubmitPath = enum {
+    interop_handle,
+    true_zero_copy,
+};
+
 fn selectUploadPath(format: c_int, plane_count: c_int) UploadPath {
     if (format == gui.VIDEO_FRAME_FORMAT_NV12 and plane_count >= 2) {
         return .nv12;
@@ -46,6 +51,10 @@ fn toGuiBackendStatus(status: VideoBackendStatus) c_int {
         .true_zero_copy => gui.VIDEO_BACKEND_STATUS_TRUE_ZERO_COPY,
         .force_zero_copy_blocked => gui.VIDEO_BACKEND_STATUS_FORCE_ZERO_COPY_BLOCKED,
     };
+}
+
+fn selectInteropSubmitPath(status: VideoBackendStatus) InteropSubmitPath {
+    return if (status == .true_zero_copy) .true_zero_copy else .interop_handle;
 }
 
 fn renderVideoCallback(userdata: ?*anyopaque) callconv(.c) void {
@@ -229,13 +238,26 @@ pub const App = struct {
                             }
                         },
                         .interop => |interop| {
-                            _ = gui.renderer_submit_interop_handle(
-                                &renderer,
-                                interop.token,
-                                interop.width,
-                                interop.height,
-                                @intFromEnum(interop.format),
-                            );
+                            switch (selectInteropSubmitPath(snapshot.video_backend_status)) {
+                                .true_zero_copy => {
+                                    _ = gui.renderer_submit_true_zero_copy_handle(
+                                        &renderer,
+                                        interop.token,
+                                        interop.width,
+                                        interop.height,
+                                        @intFromEnum(interop.format),
+                                    );
+                                },
+                                .interop_handle => {
+                                    _ = gui.renderer_submit_interop_handle(
+                                        &renderer,
+                                        interop.token,
+                                        interop.width,
+                                        interop.height,
+                                        @intFromEnum(interop.format),
+                                    );
+                                },
+                            }
                         },
                     }
                 }
@@ -290,4 +312,10 @@ test "toGuiBackendStatus maps interop statuses" {
     try std.testing.expectEqual(@as(c_int, gui.VIDEO_BACKEND_STATUS_INTEROP_HANDLE), toGuiBackendStatus(.interop_handle));
     try std.testing.expectEqual(@as(c_int, gui.VIDEO_BACKEND_STATUS_TRUE_ZERO_COPY), toGuiBackendStatus(.true_zero_copy));
     try std.testing.expectEqual(@as(c_int, gui.VIDEO_BACKEND_STATUS_FORCE_ZERO_COPY_BLOCKED), toGuiBackendStatus(.force_zero_copy_blocked));
+}
+
+test "selectInteropSubmitPath chooses true-zero-copy only for active status" {
+    try std.testing.expectEqual(InteropSubmitPath.true_zero_copy, selectInteropSubmitPath(.true_zero_copy));
+    try std.testing.expectEqual(InteropSubmitPath.interop_handle, selectInteropSubmitPath(.interop_handle));
+    try std.testing.expectEqual(InteropSubmitPath.interop_handle, selectInteropSubmitPath(.software));
 }

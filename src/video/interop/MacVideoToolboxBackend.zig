@@ -8,7 +8,8 @@ const c = @cImport({
 });
 
 pub const Capabilities = struct {
-    zero_copy: bool,
+    interop_handle: bool,
+    true_zero_copy: bool,
     supports_nv12: bool,
     supports_yuv420p: bool,
 };
@@ -44,12 +45,13 @@ pub const MacVideoToolboxBackend = struct {
 
     pub fn capabilities(_: *const MacVideoToolboxBackend) Capabilities {
         if (builtin.os.tag != .macos) {
-            return .{ .zero_copy = false, .supports_nv12 = false, .supports_yuv420p = false };
+            return .{ .interop_handle = false, .true_zero_copy = false, .supports_nv12 = false, .supports_yuv420p = false };
         }
 
         const has_vt = c.av_hwdevice_find_type_by_name("videotoolbox") != c.AV_HWDEVICE_TYPE_NONE;
         return .{
-            .zero_copy = has_vt,
+            .interop_handle = has_vt,
+            .true_zero_copy = false,
             .supports_nv12 = has_vt,
             .supports_yuv420p = has_vt,
         };
@@ -70,6 +72,7 @@ pub const MacVideoToolboxBackend = struct {
         self.host_frame.width = frame.width;
         self.host_frame.height = frame.height;
         self.host_frame.format = frame.format;
+        self.host_frame.source_is_hw = if (frame.source_hw) 1 else 0;
         self.has_frame = true;
     }
 
@@ -94,7 +97,8 @@ test "mac videotoolbox backend reports unavailable off macos" {
 
     var backend = MacVideoToolboxBackend{};
     const caps = backend.capabilities();
-    try std.testing.expect(!caps.zero_copy);
+    try std.testing.expect(!caps.interop_handle);
+    try std.testing.expect(!caps.true_zero_copy);
 }
 
 test "mac backend returns interop handle after submit" {
@@ -110,6 +114,7 @@ test "mac backend returns interop handle after submit" {
         .height = 16,
         .format = 0,
         .pts = 0.0,
+        .source_hw = false,
     };
 
     try backend.submitDecodedFrame(frame);

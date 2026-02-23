@@ -23,10 +23,13 @@ pub const RenderableFrame = union(enum) {
 };
 
 pub const Capabilities = struct {
-    zero_copy: bool,
+    interop_handle: bool,
+    true_zero_copy: bool,
     supports_nv12: bool,
     supports_yuv420p: bool,
 };
+
+pub const InitError = error{UnsupportedZeroCopy};
 
 pub const VideoInterop = struct {
     kind: BackendKind,
@@ -40,7 +43,7 @@ pub const VideoInterop = struct {
     submit_failure_count: u64,
     acquire_failure_count: u64,
 
-    pub fn init(mode: SelectionMode) VideoInterop {
+    pub fn init(mode: SelectionMode) InitError!VideoInterop {
         var interop = VideoInterop{
             .kind = .software_upload,
             .mode = mode,
@@ -55,16 +58,16 @@ pub const VideoInterop = struct {
         };
         interop.software.init();
         interop.mac_backend.init();
-        interop.kind = interop.resolveBackendKind();
+        interop.kind = try interop.resolveBackendKind();
         return interop;
     }
 
-    fn resolveBackendKind(self: *const VideoInterop) BackendKind {
+    fn resolveBackendKind(self: *const VideoInterop) InitError!BackendKind {
         const mac_caps = self.mac_backend.capabilities();
         return switch (self.mode) {
             .force_software => .software_upload,
-            .force_zero_copy => if (mac_caps.zero_copy) .macos_videotoolbox else .software_upload,
-            .auto => if (mac_caps.zero_copy) .macos_videotoolbox else .software_upload,
+            .force_zero_copy => if (mac_caps.true_zero_copy) .macos_videotoolbox else error.UnsupportedZeroCopy,
+            .auto => if (mac_caps.interop_handle) .macos_videotoolbox else .software_upload,
         };
     }
 
@@ -96,6 +99,9 @@ pub const VideoInterop = struct {
         self.submit_failure_count += 1;
         self.consecutive_failures += 1;
         if (self.kind == .macos_videotoolbox and self.consecutive_failures >= self.failure_threshold) {
+            if (self.mode == .force_zero_copy) {
+                return;
+            }
             self.kind = .software_upload;
             self.fallback_switches += 1;
         }
@@ -120,14 +126,16 @@ pub const VideoInterop = struct {
             .macos_videotoolbox => blk: {
                 const mac_caps = self.mac_backend.capabilities();
                 break :blk SoftwareUploadBackendMod.Capabilities{
-                    .zero_copy = mac_caps.zero_copy,
+                    .interop_handle = mac_caps.interop_handle,
+                    .true_zero_copy = mac_caps.true_zero_copy,
                     .supports_nv12 = mac_caps.supports_nv12,
                     .supports_yuv420p = mac_caps.supports_yuv420p,
                 };
             },
         };
         return .{
-            .zero_copy = caps.zero_copy,
+            .interop_handle = caps.interop_handle,
+            .true_zero_copy = caps.true_zero_copy,
             .supports_nv12 = caps.supports_nv12,
             .supports_yuv420p = caps.supports_yuv420p,
         };
@@ -171,14 +179,14 @@ pub const VideoInterop = struct {
 };
 
 test "video interop auto mode selects available backend" {
-    var interop = VideoInterop.init(.auto);
+    var interop = try VideoInterop.init(.auto);
     defer interop.deinit();
 
     const mac_caps = interop.mac_backend.capabilities();
-    const expected: BackendKind = if (mac_caps.zero_copy) .macos_videotoolbox else .software_upload;
+    const expected: BackendKind = if (mac_caps.interop_handle) .macos_videotoolbox else .software_upload;
     try std.testing.expectEqual(expected, interop.kind);
     const caps = interop.capabilities();
-    try std.testing.expectEqual(mac_caps.zero_copy, caps.zero_copy);
+    try std.testing.expectEqual(mac_caps.interop_handle, caps.interop_handle);
 }
 
 test "selection parser maps known backend values" {
@@ -190,13 +198,21 @@ test "selection parser maps known backend values" {
 }
 
 test "force software mode never selects zero-copy backend" {
-    var interop = VideoInterop.init(.force_software);
+    var interop = try VideoInterop.init(.force_software);
     defer interop.deinit();
     try std.testing.expectEqual(BackendKind.software_upload, interop.kind);
 }
 
+test "force zero-copy mode fails fast when true zero-copy unsupported" {
+    if (VideoInterop.init(.force_zero_copy)) |_| {
+        return;
+    } else |err| {
+        try std.testing.expectEqual(error.UnsupportedZeroCopy, err);
+    }
+}
+
 test "interop falls back to software after repeated backend failures" {
-    var interop = VideoInterop.init(.auto);
+    var interop = try VideoInterop.init(.auto);
     defer interop.deinit();
 
     if (interop.kind != .macos_videotoolbox) {
@@ -213,6 +229,7 @@ test "interop falls back to software after repeated backend failures" {
         .height = 1,
         .format = 0,
         .pts = 0.0,
+        .source_hw = false,
     };
 
     interop.submitDecodedFrame(frame);

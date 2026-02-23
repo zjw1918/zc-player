@@ -49,7 +49,11 @@ pub const VideoPipeline = struct {
             return error.InitFailed;
         }
         self.initialized = true;
-        self.interop = VideoInterop.init(VideoInterop.selectionModeFromEnvironment());
+        self.interop = VideoInterop.init(VideoInterop.selectionModeFromEnvironment()) catch {
+            c.video_pipeline_destroy(&self.handle);
+            self.initialized = false;
+            return error.InitFailed;
+        };
     }
 
     pub fn start(self: *VideoPipeline) !void {
@@ -116,6 +120,7 @@ pub const VideoPipeline = struct {
                 .height = height,
                 .format = format,
                 .pts = master_clock,
+                .source_hw = c.player_is_video_hw_enabled(self.handle.player) != 0,
             };
             interop.submitDecodedFrame(software_frame);
 

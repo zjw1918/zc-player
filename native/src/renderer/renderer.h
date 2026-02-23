@@ -14,6 +14,7 @@ typedef struct {
     int width;
     int height;
     int format;
+    int source_is_hw;
 } RendererInteropHostFrame;
 
 typedef struct {

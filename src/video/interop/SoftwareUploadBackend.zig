@@ -8,10 +8,12 @@ pub const SoftwarePlaneFrame = struct {
     height: c_int,
     format: c_int,
     pts: f64,
+    source_hw: bool,
 };
 
 pub const Capabilities = struct {
-    zero_copy: bool,
+    interop_handle: bool,
+    true_zero_copy: bool,
     supports_nv12: bool,
     supports_yuv420p: bool,
 };
@@ -29,7 +31,8 @@ pub const SoftwareUploadBackend = struct {
 
     pub fn capabilities(_: *const SoftwareUploadBackend) Capabilities {
         return .{
-            .zero_copy = false,
+            .interop_handle = false,
+            .true_zero_copy = false,
             .supports_nv12 = true,
             .supports_yuv420p = true,
         };
@@ -54,7 +57,8 @@ test "software backend capabilities report no zero-copy" {
     defer backend.deinit();
 
     const caps = backend.capabilities();
-    try std.testing.expect(!caps.zero_copy);
+    try std.testing.expect(!caps.interop_handle);
+    try std.testing.expect(!caps.true_zero_copy);
     try std.testing.expect(caps.supports_nv12);
     try std.testing.expect(caps.supports_yuv420p);
 }

@@ -104,11 +104,6 @@ static const char* fallback_reason_label(int reason) {
     }
 }
 
-static int force_interop_handle_enabled(void) {
-    const char* value = getenv("ZC_FORCE_INTEROP_HANDLE");
-    return value && strcmp(value, "1") == 0;
-}
-
 static void SDLCALL open_file_dialog_callback(void* userdata, const char* const* filelist, int filter) {
     (void)filter;
 
@@ -372,11 +367,7 @@ void ui_render(UIState* ui, const PlaybackSnapshot* snapshot) {
 
         ImGui::Text("Backend: %s", backend_status_label(snapshot->video_backend_status));
         ImGui::SameLine();
-        int fallback_reason = snapshot->video_fallback_reason;
-        if (force_interop_handle_enabled() && fallback_reason == VIDEO_FALLBACK_REASON_IMPORT_FAILURE) {
-            fallback_reason = VIDEO_FALLBACK_REASON_NONE;
-        }
-        ImGui::Text("Fallback: %s", fallback_reason_label(fallback_reason));
+        ImGui::Text("Fallback: %s", fallback_reason_label(snapshot->video_fallback_reason));
         ImGui::SameLine();
         ImGui::TextUnformatted("  Space Play/Pause  Left/Right Seek  Up/Down Volume");
     }

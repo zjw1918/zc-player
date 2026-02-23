@@ -9,6 +9,8 @@ const libc = @cImport({
     @cInclude("stdlib.h");
 });
 
+const force_interop_env_name = "ZC_FORCE_INTEROP_HANDLE";
+
 const UploadPath = enum {
     rgba,
     nv12,
@@ -68,7 +70,7 @@ fn toGuiFallbackReason(reason: VideoFallbackReason) c_int {
 }
 
 fn selectInteropSubmitPath(status: VideoBackendStatus) InteropSubmitPath {
-    if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZC_FORCE_INTEROP_HANDLE")) |value| {
+    if (std.process.getEnvVarOwned(std.heap.page_allocator, force_interop_env_name)) |value| {
         defer std.heap.page_allocator.free(value);
         if (std.mem.eql(u8, value, "1")) {
             return .interop_handle;
@@ -76,6 +78,24 @@ fn selectInteropSubmitPath(status: VideoBackendStatus) InteropSubmitPath {
     } else |_| {}
 
     return if (status == .true_zero_copy) .true_zero_copy else .interop_handle;
+}
+
+fn captureForceInteropEnv() !?[]u8 {
+    return std.process.getEnvVarOwned(std.heap.page_allocator, force_interop_env_name) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+}
+
+fn restoreForceInteropEnv(previous: ?[]const u8) !void {
+    if (previous) |value| {
+        const value_z = try std.heap.page_allocator.dupeZ(u8, value);
+        defer std.heap.page_allocator.free(value_z);
+        try std.testing.expectEqual(@as(c_int, 0), libc.setenv(force_interop_env_name, value_z, 1));
+        return;
+    }
+
+    try std.testing.expectEqual(@as(c_int, 0), libc.unsetenv(force_interop_env_name));
 }
 
 fn isGpuInteropPayload(handle_token: u64) bool {
@@ -367,8 +387,11 @@ test "selectInteropSubmitPath chooses true-zero-copy when active" {
 }
 
 test "selectInteropSubmitPath forces interop when env override set" {
-    try std.testing.expectEqual(@as(c_int, 0), libc.setenv("ZC_FORCE_INTEROP_HANDLE", "1", 1));
-    defer _ = libc.unsetenv("ZC_FORCE_INTEROP_HANDLE");
+    const previous = try captureForceInteropEnv();
+    defer if (previous) |value| std.heap.page_allocator.free(value);
+    defer restoreForceInteropEnv(previous) catch unreachable;
+
+    try std.testing.expectEqual(@as(c_int, 0), libc.setenv(force_interop_env_name, "1", 1));
 
     try std.testing.expectEqual(InteropSubmitPath.interop_handle, selectInteropSubmitPath(.true_zero_copy));
 }

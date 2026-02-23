@@ -190,9 +190,6 @@ pub const VideoInterop = struct {
         if (self.force_zero_copy_blocked) {
             return .unsupported_mode;
         }
-        if (forceInteropHandleEnabled() and self.last_fallback_reason == .import_failure) {
-            return .none;
-        }
         return self.last_fallback_reason;
     }
 
@@ -275,6 +272,26 @@ pub const VideoInterop = struct {
         self.software.releaseFrame();
     }
 };
+
+const force_interop_env_name = "ZC_FORCE_INTEROP_HANDLE";
+
+fn captureForceInteropEnv() !?[]u8 {
+    return std.process.getEnvVarOwned(std.heap.page_allocator, force_interop_env_name) catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+}
+
+fn restoreForceInteropEnv(previous: ?[]const u8) !void {
+    if (previous) |value| {
+        const value_z = try std.heap.page_allocator.dupeZ(u8, value);
+        defer std.heap.page_allocator.free(value_z);
+        try std.testing.expectEqual(@as(c_int, 0), libc.setenv(force_interop_env_name, value_z, 1));
+        return;
+    }
+
+    try std.testing.expectEqual(@as(c_int, 0), libc.unsetenv(force_interop_env_name));
+}
 
 test "video interop auto mode selects available backend" {
     var interop = try VideoInterop.init(.auto);
@@ -460,11 +477,41 @@ test "true-zero-copy forced interop does not set import-failure fallback noise" 
     interop.mac_backend.host_frame.payload_kind = 1;
     interop.mac_backend.host_frame.gpu_token = 0x1;
 
-    try std.testing.expectEqual(@as(c_int, 0), libc.setenv("ZC_FORCE_INTEROP_HANDLE", "1", 1));
-    defer _ = libc.unsetenv("ZC_FORCE_INTEROP_HANDLE");
+    const previous = try captureForceInteropEnv();
+    defer if (previous) |value| std.heap.page_allocator.free(value);
+    defer restoreForceInteropEnv(previous) catch unreachable;
+
+    try std.testing.expectEqual(@as(c_int, 0), libc.setenv(force_interop_env_name, "1", 1));
 
     try std.testing.expectEqual(RuntimeStatus.interop_handle, interop.runtimeStatus());
     interop.reportTrueZeroCopySubmitResult(false);
     try std.testing.expectEqual(RuntimeStatus.interop_handle, interop.runtimeStatus());
     try std.testing.expectEqual(FallbackReason.none, interop.fallbackReason());
+}
+
+test "forced interop preserves real import failure reason" {
+    var interop = VideoInterop{
+        .kind = .macos_videotoolbox,
+        .mode = .auto,
+        .software = .{},
+        .mac_backend = .{},
+        .fallback_switches = 0,
+        .consecutive_failures = 0,
+        .failure_threshold = 3,
+        .submit_success_count = 0,
+        .submit_failure_count = 0,
+        .acquire_failure_count = 0,
+        .true_submit_success_count = 0,
+        .true_submit_failure_count = 0,
+        .force_zero_copy_blocked = false,
+        .last_fallback_reason = .import_failure,
+        .true_zero_copy_suppressed = false,
+    };
+
+    const previous = try captureForceInteropEnv();
+    defer if (previous) |value| std.heap.page_allocator.free(value);
+    defer restoreForceInteropEnv(previous) catch unreachable;
+
+    try std.testing.expectEqual(@as(c_int, 0), libc.setenv(force_interop_env_name, "1", 1));
+    try std.testing.expectEqual(FallbackReason.import_failure, interop.fallbackReason());
 }

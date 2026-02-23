@@ -1,5 +1,6 @@
 const std = @import("std");
 const SoftwareUploadBackendMod = @import("SoftwareUploadBackend.zig");
+const MacVideoToolboxBackendMod = @import("MacVideoToolboxBackend.zig");
 
 pub const BackendKind = enum {
     software_upload,
@@ -31,15 +32,28 @@ pub const VideoInterop = struct {
     kind: BackendKind,
     mode: SelectionMode,
     software: SoftwareUploadBackendMod.SoftwareUploadBackend,
+    mac_backend: MacVideoToolboxBackendMod.MacVideoToolboxBackend,
 
     pub fn init(mode: SelectionMode) VideoInterop {
         var interop = VideoInterop{
             .kind = .software_upload,
             .mode = mode,
             .software = .{},
+            .mac_backend = .{},
         };
         interop.software.init();
+        interop.mac_backend.init();
+        interop.kind = interop.resolveBackendKind();
         return interop;
+    }
+
+    fn resolveBackendKind(self: *const VideoInterop) BackendKind {
+        const mac_caps = self.mac_backend.capabilities();
+        return switch (self.mode) {
+            .force_software => .software_upload,
+            .force_zero_copy => if (mac_caps.zero_copy) .macos_videotoolbox else .software_upload,
+            .auto => if (mac_caps.zero_copy) .macos_videotoolbox else .software_upload,
+        };
     }
 
     pub fn parseSelectionMode(value: ?[]const u8) SelectionMode {
@@ -62,11 +76,22 @@ pub const VideoInterop = struct {
     }
 
     pub fn deinit(self: *VideoInterop) void {
+        self.mac_backend.deinit();
         self.software.deinit();
     }
 
     pub fn capabilities(self: *const VideoInterop) Capabilities {
-        const caps = self.software.capabilities();
+        const caps = switch (self.kind) {
+            .software_upload => self.software.capabilities(),
+            .macos_videotoolbox => blk: {
+                const mac_caps = self.mac_backend.capabilities();
+                break :blk SoftwareUploadBackendMod.Capabilities{
+                    .zero_copy = mac_caps.zero_copy,
+                    .supports_nv12 = mac_caps.supports_nv12,
+                    .supports_yuv420p = mac_caps.supports_yuv420p,
+                };
+            },
+        };
         return .{
             .zero_copy = caps.zero_copy,
             .supports_nv12 = caps.supports_nv12,
@@ -90,13 +115,15 @@ pub const VideoInterop = struct {
     }
 };
 
-test "video interop defaults to software backend" {
+test "video interop auto mode selects available backend" {
     var interop = VideoInterop.init(.auto);
     defer interop.deinit();
 
-    try std.testing.expectEqual(BackendKind.software_upload, interop.kind);
+    const mac_caps = interop.mac_backend.capabilities();
+    const expected: BackendKind = if (mac_caps.zero_copy) .macos_videotoolbox else .software_upload;
+    try std.testing.expectEqual(expected, interop.kind);
     const caps = interop.capabilities();
-    try std.testing.expect(!caps.zero_copy);
+    try std.testing.expectEqual(mac_caps.zero_copy, caps.zero_copy);
 }
 
 test "selection parser maps known backend values" {
@@ -105,4 +132,10 @@ test "selection parser maps known backend values" {
     try std.testing.expectEqual(SelectionMode.force_software, VideoInterop.parseSelectionMode("software"));
     try std.testing.expectEqual(SelectionMode.force_zero_copy, VideoInterop.parseSelectionMode("zero_copy"));
     try std.testing.expectEqual(SelectionMode.auto, VideoInterop.parseSelectionMode("unknown"));
+}
+
+test "force software mode never selects zero-copy backend" {
+    var interop = VideoInterop.init(.force_software);
+    defer interop.deinit();
+    try std.testing.expectEqual(BackendKind.software_upload, interop.kind);
 }

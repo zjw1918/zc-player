@@ -123,6 +123,10 @@ pub const Player = struct {
         return c.player_get_video_format(&self.handle);
     }
 
+    pub fn isVideoHwEnabled(self: *Player) bool {
+        return c.player_is_video_hw_enabled(&self.handle) != 0;
+    }
+
     pub fn videoPlanes(self: *Player) ?VideoPlanes {
         var planes: [4][*c]u8 = .{ null, null, null, null };
         var linesizes: [4]c_int = .{ 0, 0, 0, 0 };

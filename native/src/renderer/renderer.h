@@ -7,6 +7,11 @@
 
 #define VIDEO_UPLOAD_SLOTS 3
 
+typedef enum {
+    RENDERER_INTEROP_PAYLOAD_HOST = 0,
+    RENDERER_INTEROP_PAYLOAD_GPU = 1,
+} RendererInteropPayloadKind;
+
 typedef struct {
     uint8_t* planes[3];
     int linesizes[3];
@@ -15,6 +20,8 @@ typedef struct {
     int height;
     int format;
     int source_is_hw;
+    int payload_kind;
+    uint64_t gpu_token;
 } RendererInteropHostFrame;
 
 typedef struct {

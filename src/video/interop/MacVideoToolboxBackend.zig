@@ -101,6 +101,8 @@ pub const MacVideoToolboxBackend = struct {
         self.host_frame.height = frame.height;
         self.host_frame.format = frame.format;
         self.host_frame.source_is_hw = if (frame.source_hw) 1 else 0;
+        self.host_frame.payload_kind = c.RENDERER_INTEROP_PAYLOAD_HOST;
+        self.host_frame.gpu_token = 0;
         if (frame.source_hw) {
             self.hw_frame_streak += 1;
         } else {
@@ -174,4 +176,24 @@ test "true zero-copy active requires sustained hardware frames" {
     try std.testing.expect(!trueZeroCopyActiveForStreak(true, 5, 12));
     try std.testing.expect(trueZeroCopyActiveForStreak(true, 12, 12));
     try std.testing.expect(!trueZeroCopyActiveForStreak(false, 20, 12));
+}
+
+test "interop contract marks host bridge payload kind" {
+    var backend = MacVideoToolboxBackend{};
+    backend.init();
+    defer backend.deinit();
+
+    const frame = SoftwareUploadBackendMod.SoftwarePlaneFrame{
+        .planes = .{ null, null, null },
+        .linesizes = .{ 0, 0, 0 },
+        .plane_count = 1,
+        .width = 16,
+        .height = 16,
+        .format = 0,
+        .pts = 0.0,
+        .source_hw = false,
+    };
+
+    try backend.submitDecodedFrame(frame);
+    try std.testing.expectEqual(@as(c_int, c.RENDERER_INTEROP_PAYLOAD_HOST), backend.host_frame.payload_kind);
 }

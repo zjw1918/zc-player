@@ -4,6 +4,7 @@ const SoftwareUploadBackendMod = @import("SoftwareUploadBackend.zig");
 
 const c = @cImport({
     @cInclude("libavutil/hwcontext.h");
+    @cInclude("renderer/renderer.h");
 });
 
 pub const Capabilities = struct {
@@ -26,13 +27,19 @@ pub const InteropHandle = struct {
 
 pub const MacVideoToolboxBackend = struct {
     initialized: bool = false,
+    host_frame: c.RendererInteropHostFrame = std.mem.zeroes(c.RendererInteropHostFrame),
+    has_frame: bool = false,
 
     pub fn init(self: *MacVideoToolboxBackend) void {
         self.initialized = true;
+        self.host_frame = std.mem.zeroes(c.RendererInteropHostFrame);
+        self.has_frame = false;
     }
 
     pub fn deinit(self: *MacVideoToolboxBackend) void {
         self.initialized = false;
+        self.host_frame = std.mem.zeroes(c.RendererInteropHostFrame);
+        self.has_frame = false;
     }
 
     pub fn capabilities(_: *const MacVideoToolboxBackend) Capabilities {
@@ -48,12 +55,35 @@ pub const MacVideoToolboxBackend = struct {
         };
     }
 
-    pub fn submitDecodedFrame(_: *MacVideoToolboxBackend, _: SoftwareUploadBackendMod.SoftwarePlaneFrame) SubmitError!void {
-        return error.NotSupported;
+    pub fn submitDecodedFrame(self: *MacVideoToolboxBackend, frame: SoftwareUploadBackendMod.SoftwarePlaneFrame) SubmitError!void {
+        if (!self.initialized) {
+            return error.NotSupported;
+        }
+
+        self.host_frame.planes[0] = frame.planes[0];
+        self.host_frame.planes[1] = frame.planes[1];
+        self.host_frame.planes[2] = frame.planes[2];
+        self.host_frame.linesizes[0] = frame.linesizes[0];
+        self.host_frame.linesizes[1] = frame.linesizes[1];
+        self.host_frame.linesizes[2] = frame.linesizes[2];
+        self.host_frame.plane_count = frame.plane_count;
+        self.host_frame.width = frame.width;
+        self.host_frame.height = frame.height;
+        self.host_frame.format = frame.format;
+        self.has_frame = true;
     }
 
-    pub fn acquireRenderableFrame(_: *MacVideoToolboxBackend) AcquireError!?InteropHandle {
-        return error.NotSupported;
+    pub fn acquireRenderableFrame(self: *MacVideoToolboxBackend) AcquireError!?InteropHandle {
+        if (!self.initialized) {
+            return error.NotSupported;
+        }
+        if (!self.has_frame) {
+            return null;
+        }
+
+        return InteropHandle{
+            .token = @intFromPtr(&self.host_frame),
+        };
     }
 };
 
@@ -65,4 +95,24 @@ test "mac videotoolbox backend reports unavailable off macos" {
     var backend = MacVideoToolboxBackend{};
     const caps = backend.capabilities();
     try std.testing.expect(!caps.zero_copy);
+}
+
+test "mac backend returns interop handle after submit" {
+    var backend = MacVideoToolboxBackend{};
+    backend.init();
+    defer backend.deinit();
+
+    const frame = SoftwareUploadBackendMod.SoftwarePlaneFrame{
+        .planes = .{ null, null, null },
+        .linesizes = .{ 0, 0, 0 },
+        .plane_count = 1,
+        .width = 16,
+        .height = 16,
+        .format = 0,
+        .pts = 0.0,
+    };
+
+    try backend.submitDecodedFrame(frame);
+    const handle = try backend.acquireRenderableFrame();
+    try std.testing.expect(handle != null);
 }

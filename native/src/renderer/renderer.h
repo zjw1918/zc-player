@@ -8,6 +8,15 @@
 #define VIDEO_UPLOAD_SLOTS 3
 
 typedef struct {
+    uint8_t* planes[3];
+    int linesizes[3];
+    int plane_count;
+    int width;
+    int height;
+    int format;
+} RendererInteropHostFrame;
+
+typedef struct {
     VkImage image;
     VkDeviceMemory image_memory;
     VkImageView image_view;

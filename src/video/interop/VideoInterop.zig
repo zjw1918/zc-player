@@ -203,6 +203,8 @@ test "interop falls back to software after repeated backend failures" {
         return;
     }
 
+    interop.mac_backend.deinit();
+
     const frame = SoftwareUploadBackendMod.SoftwarePlaneFrame{
         .planes = .{ null, null, null },
         .linesizes = .{ 0, 0, 0 },

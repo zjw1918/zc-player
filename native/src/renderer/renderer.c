@@ -94,7 +94,9 @@ static int create_buffer(App* app, VkDeviceSize size, VkBufferUsageFlags usage, 
 
 static int create_video_plane_resources(App* app, int width, int height, VkFormat format, VkImage* image, VkDeviceMemory* image_memory, VkImageView* image_view, VkBuffer* staging_buffer, VkDeviceMemory* staging_memory, uint8_t** staging_mapped) {
     VkDeviceSize data_size = (VkDeviceSize)(size_t)width * (VkDeviceSize)(size_t)height;
-    if (format == VK_FORMAT_R8G8_UNORM) {
+    if (format == VK_FORMAT_R8G8B8A8_UNORM) {
+        data_size *= 4;
+    } else if (format == VK_FORMAT_R8G8_UNORM) {
         data_size *= 2;
     }
 
@@ -1282,17 +1284,52 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
 }
 
 int renderer_submit_interop_handle(Renderer* ren, uint64_t handle_token, int width, int height, int format) {
-    (void)handle_token;
-
     if (ren == NULL || width <= 0 || height <= 0) {
         return -1;
     }
 
-    /* Placeholder entrypoint for future zero-copy render path wiring. */
-    ren->video_width = width;
-    ren->video_height = height;
-    ren->video_format = format;
-    return -1;
+    if (handle_token == 0) {
+        return -1;
+    }
+
+    const RendererInteropHostFrame* frame = (const RendererInteropHostFrame*)(uintptr_t)handle_token;
+    if (frame->plane_count <= 0 || frame->planes[0] == NULL) {
+        return -1;
+    }
+
+    if (format == VIDEO_FORMAT_NV12 && frame->plane_count >= 2 && frame->planes[1] != NULL) {
+        return renderer_upload_video_nv12(
+            ren,
+            frame->planes[0],
+            frame->linesizes[0],
+            frame->planes[1],
+            frame->linesizes[1],
+            width,
+            height
+        );
+    }
+
+    if (format == VIDEO_FORMAT_YUV420P && frame->plane_count >= 3 && frame->planes[1] != NULL && frame->planes[2] != NULL) {
+        return renderer_upload_video_yuv420p(
+            ren,
+            frame->planes[0],
+            frame->linesizes[0],
+            frame->planes[1],
+            frame->linesizes[1],
+            frame->planes[2],
+            frame->linesizes[2],
+            width,
+            height
+        );
+    }
+
+    return renderer_upload_video(
+        ren,
+        frame->planes[0],
+        width,
+        height,
+        frame->linesizes[0]
+    );
 }
 
 void renderer_render(Renderer* ren) {

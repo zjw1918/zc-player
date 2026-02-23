@@ -16,8 +16,8 @@ fn probeTrueZeroCopySupportForValue(flag_value: ?[]const u8, has_vt: bool, is_ma
         return false;
     }
 
-    const value = flag_value orelse return false;
-    return value.len > 0 and value[0] != '0';
+    const value = flag_value orelse return true;
+    return value.len == 0 or value[0] != '0';
 }
 
 fn trueZeroCopyActiveForStreak(capable: bool, hw_frame_streak: u32, threshold: u32) bool {
@@ -231,8 +231,8 @@ test "mac backend returns interop handle after submit" {
     try std.testing.expect(handle != null);
 }
 
-test "true zero-copy probe requires explicit opt-in flag" {
-    try std.testing.expect(!probeTrueZeroCopySupportForValue(null, true, true));
+test "true-zero-copy probe defaults on and allows explicit disable" {
+    try std.testing.expect(probeTrueZeroCopySupportForValue(null, true, true));
     try std.testing.expect(!probeTrueZeroCopySupportForValue("0", true, true));
     try std.testing.expect(probeTrueZeroCopySupportForValue("1", true, true));
 }

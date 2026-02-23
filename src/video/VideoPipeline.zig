@@ -131,6 +131,7 @@ pub const VideoPipeline = struct {
         }
 
         if (self.interop) |*interop| {
+            const source_hw = c.player_is_video_hw_enabled(self.handle.player) != 0;
             const software_frame = SoftwareUploadBackendMod.SoftwarePlaneFrame{
                 .planes = planes,
                 .linesizes = linesizes,
@@ -139,7 +140,8 @@ pub const VideoPipeline = struct {
                 .height = height,
                 .format = format,
                 .pts = master_clock,
-                .source_hw = c.player_is_video_hw_enabled(self.handle.player) != 0,
+                .source_hw = source_hw,
+                .gpu_token = if (source_hw) c.player_get_video_hw_frame_token(self.handle.player) else 0,
             };
             interop.submitDecodedFrame(software_frame);
 

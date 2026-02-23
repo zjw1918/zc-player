@@ -460,6 +460,14 @@ pub export fn player_is_video_hw_enabled(player: ?*c.Player) c_int {
     return c.video_decoder_is_hw_enabled(&player.?.decoder);
 }
 
+pub export fn player_get_video_hw_frame_token(player: ?*c.Player) u64 {
+    if (player == null) {
+        return 0;
+    }
+
+    return c.video_decoder_get_hw_frame_token(&player.?.decoder);
+}
+
 pub export fn player_get_video_pts(player: ?*c.Player) f64 {
     if (player == null) {
         return 0.0;

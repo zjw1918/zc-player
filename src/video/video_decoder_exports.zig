@@ -79,6 +79,33 @@ fn disableHardwareDecode(decoder: *c.VideoDecoder) void {
     codec_ctx.*.@"opaque" = null;
 }
 
+fn clearHardwareFrameRef(decoder: *c.VideoDecoder) void {
+    if (decoder.hw_frame_ref != null) {
+        c.av_frame_free(&decoder.hw_frame_ref);
+    }
+}
+
+fn refreshHardwareFrameRef(decoder: *c.VideoDecoder) c_int {
+    if (decoder.frame == null) {
+        return -1;
+    }
+
+    if (decoder.hw_frame_ref == null) {
+        decoder.hw_frame_ref = c.av_frame_alloc();
+    }
+
+    if (decoder.hw_frame_ref == null) {
+        return -1;
+    }
+
+    c.av_frame_unref(decoder.hw_frame_ref);
+    if (c.av_frame_ref(decoder.hw_frame_ref, decoder.frame) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
 fn configureHardwareDecode(decoder: *c.VideoDecoder, codec: ?*const c.AVCodec) void {
     disableHardwareDecode(decoder);
 
@@ -302,6 +329,8 @@ pub export fn video_decoder_destroy(dec: ?*c.VideoDecoder) void {
         c.av_frame_free(&d.sw_frame);
     }
 
+    clearHardwareFrameRef(d);
+
     if (d.frame != null) {
         c.av_frame_free(&d.frame);
     }
@@ -346,6 +375,8 @@ pub export fn video_decoder_flush(dec: ?*c.VideoDecoder) void {
         c.av_frame_unref(d.sw_frame);
     }
 
+    clearHardwareFrameRef(d);
+
     d.eof = 0;
     d.sent_eof = 0;
 }
@@ -376,6 +407,12 @@ pub export fn video_decoder_decode_frame(dec: ?*c.VideoDecoder, demuxer: ?*c.Dem
                 }
 
                 _ = c.av_frame_copy_props(d.sw_frame, d.frame);
+
+                if (refreshHardwareFrameRef(d) != 0) {
+                    return -1;
+                }
+            } else {
+                clearHardwareFrameRef(d);
             }
 
             var ts = d.frame.*.best_effort_timestamp;
@@ -481,6 +518,19 @@ pub export fn video_decoder_is_hw_enabled(dec: ?*c.VideoDecoder) c_int {
     }
 
     return dec.?.hw_enabled;
+}
+
+pub export fn video_decoder_get_hw_frame_token(dec: ?*c.VideoDecoder) u64 {
+    if (dec == null) {
+        return 0;
+    }
+
+    const d = dec.?;
+    if (d.hw_enabled == 0 or d.hw_frame_ref == null) {
+        return 0;
+    }
+
+    return @intFromPtr(d.hw_frame_ref);
 }
 
 pub export fn video_decoder_get_planes(

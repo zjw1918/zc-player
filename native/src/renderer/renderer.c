@@ -1338,18 +1338,28 @@ int renderer_submit_interop_handle(Renderer* ren, uint64_t handle_token, int wid
 }
 
 int renderer_submit_true_zero_copy_handle(Renderer* ren, uint64_t handle_token, int width, int height, int format) {
-    (void)handle_token;
-    (void)format;
-
-    if (ren == NULL || width <= 0 || height <= 0) {
+    if (ren == NULL || width <= 0 || height <= 0 || handle_token == 0) {
         return -1;
     }
 
-    /* Placeholder for true zero-copy GPU import consumption. */
-    ren->video_width = width;
-    ren->video_height = height;
-    ren->video_format = format;
-    return -1;
+    const RendererInteropHostFrame* frame = (const RendererInteropHostFrame*)(uintptr_t)handle_token;
+    if (frame->payload_kind != RENDERER_INTEROP_PAYLOAD_GPU || frame->gpu_token == 0) {
+        return -1;
+    }
+
+    if (format != VIDEO_FRAME_FORMAT_NV12 || frame->plane_count < 2 || frame->planes[0] == NULL || frame->planes[1] == NULL) {
+        return -1;
+    }
+
+    return renderer_upload_video_nv12(
+        ren,
+        frame->planes[0],
+        frame->linesizes[0],
+        frame->planes[1],
+        frame->linesizes[1],
+        width,
+        height
+    );
 }
 
 void renderer_render(Renderer* ren) {

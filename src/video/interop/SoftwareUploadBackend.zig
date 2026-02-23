@@ -9,6 +9,7 @@ pub const SoftwarePlaneFrame = struct {
     format: c_int,
     pts: f64,
     source_hw: bool,
+    gpu_token: u64,
 };
 
 pub const Capabilities = struct {

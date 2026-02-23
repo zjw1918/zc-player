@@ -65,6 +65,7 @@ int player_get_video_frame(Player* player, uint8_t** data, int* linesize);
 int player_get_video_planes(Player* player, uint8_t** planes, int* linesizes, int* plane_count);
 int player_get_video_format(Player* player);
 int player_is_video_hw_enabled(Player* player);
+uint64_t player_get_video_hw_frame_token(Player* player);
 double player_get_video_pts(Player* player);
 int player_has_audio(Player* player);
 int player_get_audio_sample_rate(Player* player);

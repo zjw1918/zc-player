@@ -278,6 +278,7 @@ test "interop falls back to software after repeated backend failures" {
         .format = 0,
         .pts = 0.0,
         .source_hw = false,
+        .gpu_token = 0,
     };
 
     interop.submitDecodedFrame(frame);

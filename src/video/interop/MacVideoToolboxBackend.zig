@@ -3,6 +3,7 @@ const std = @import("std");
 const SoftwareUploadBackendMod = @import("SoftwareUploadBackend.zig");
 
 const c = @cImport({
+    @cInclude("libavutil/frame.h");
     @cInclude("libavutil/hwcontext.h");
     @cInclude("renderer/renderer.h");
 });
@@ -51,6 +52,7 @@ pub const MacVideoToolboxBackend = struct {
     has_frame: bool = false,
     hw_frame_streak: u32 = 0,
     true_zero_copy_capable: bool = false,
+    retained_gpu_frame: ?*c.AVFrame = null,
     frame_generation: u32 = 0,
     frame_in_flight: bool = false,
     last_frame_format: c_int = frame_format_rgba,
@@ -61,6 +63,7 @@ pub const MacVideoToolboxBackend = struct {
         self.has_frame = false;
         self.hw_frame_streak = 0;
         self.true_zero_copy_capable = self.capabilities().true_zero_copy;
+        self.retained_gpu_frame = null;
         self.frame_generation = 0;
         self.frame_in_flight = false;
         self.last_frame_format = frame_format_rgba;
@@ -72,6 +75,9 @@ pub const MacVideoToolboxBackend = struct {
         self.has_frame = false;
         self.hw_frame_streak = 0;
         self.true_zero_copy_capable = false;
+        if (self.retained_gpu_frame != null) {
+            c.av_frame_free(&self.retained_gpu_frame);
+        }
         self.frame_generation = 0;
         self.frame_in_flight = false;
         self.last_frame_format = frame_format_rgba;
@@ -117,6 +123,20 @@ pub const MacVideoToolboxBackend = struct {
         self.last_frame_format = frame.format;
         self.host_frame.payload_kind = c.RENDERER_INTEROP_PAYLOAD_HOST;
         self.host_frame.gpu_token = 0;
+        if (self.retained_gpu_frame != null) {
+            c.av_frame_free(&self.retained_gpu_frame);
+        }
+        if (frame.source_hw and frame.format == frame_format_nv12 and frame.gpu_token != 0) {
+            const source_frame: *c.AVFrame = @ptrFromInt(frame.gpu_token);
+
+            self.retained_gpu_frame = c.av_frame_alloc();
+            if (self.retained_gpu_frame != null) {
+                if (c.av_frame_ref(self.retained_gpu_frame, source_frame) == 0) {
+                    self.host_frame.payload_kind = c.RENDERER_INTEROP_PAYLOAD_GPU;
+                    self.host_frame.gpu_token = @intFromPtr(self.retained_gpu_frame);
+                }
+            }
+        }
         self.frame_generation +%= 1;
         self.frame_in_flight = false;
         if (frame.source_hw) {
@@ -203,6 +223,7 @@ test "mac backend returns interop handle after submit" {
         .format = 0,
         .pts = 0.0,
         .source_hw = false,
+        .gpu_token = 0,
     };
 
     try backend.submitDecodedFrame(frame);
@@ -253,6 +274,7 @@ test "interop contract marks host bridge payload kind" {
         .format = 0,
         .pts = 0.0,
         .source_hw = false,
+        .gpu_token = 0,
     };
 
     try backend.submitDecodedFrame(frame);
@@ -273,6 +295,7 @@ test "in-flight frame slot lifecycle requires release before reacquire" {
         .format = 0,
         .pts = 0.0,
         .source_hw = false,
+        .gpu_token = 0,
     };
 
     try backend.submitDecodedFrame(frame);
@@ -281,4 +304,40 @@ test "in-flight frame slot lifecycle requires release before reacquire" {
 
     backend.releaseRenderableFrame(handle);
     try std.testing.expect((try backend.acquireRenderableFrame()) != null);
+}
+
+test "nv12 hardware frame with gpu token marks gpu payload" {
+    var backend = MacVideoToolboxBackend{};
+    backend.init();
+    defer backend.deinit();
+
+    var source_frame = c.av_frame_alloc();
+    defer c.av_frame_free(&source_frame);
+
+    if (source_frame == null) {
+        return error.OutOfMemory;
+    }
+
+    source_frame.?.*.format = c.AV_PIX_FMT_NV12;
+    source_frame.?.*.width = 64;
+    source_frame.?.*.height = 64;
+    if (c.av_frame_get_buffer(source_frame, 32) != 0) {
+        return error.OutOfMemory;
+    }
+
+    const frame = SoftwareUploadBackendMod.SoftwarePlaneFrame{
+        .planes = .{ null, null, null },
+        .linesizes = .{ 0, 0, 0 },
+        .plane_count = 2,
+        .width = 64,
+        .height = 64,
+        .format = frame_format_nv12,
+        .pts = 0.0,
+        .source_hw = true,
+        .gpu_token = @intFromPtr(source_frame),
+    };
+
+    try backend.submitDecodedFrame(frame);
+    try std.testing.expectEqual(@as(c_int, c.RENDERER_INTEROP_PAYLOAD_GPU), backend.host_frame.payload_kind);
+    try std.testing.expect(backend.host_frame.gpu_token != 0);
 }

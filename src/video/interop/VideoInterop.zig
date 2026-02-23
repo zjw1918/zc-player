@@ -31,6 +31,12 @@ pub const Capabilities = struct {
 
 pub const InitError = error{UnsupportedZeroCopy};
 
+pub fn initErrorReason(err: InitError) []const u8 {
+    return switch (err) {
+        error.UnsupportedZeroCopy => "force_zero_copy requested, but true zero-copy backend is not available on this platform/runtime",
+    };
+}
+
 pub const VideoInterop = struct {
     kind: BackendKind,
     mode: SelectionMode,
@@ -242,4 +248,8 @@ test "interop falls back to software after repeated backend failures" {
 
 test "interop diagnostics default to disabled" {
     try std.testing.expect(!VideoInterop.diagnosticsEnabled());
+}
+
+test "unsupported zero-copy error has explicit reason" {
+    try std.testing.expect(std.mem.indexOf(u8, initErrorReason(error.UnsupportedZeroCopy), "force_zero_copy") != null);
 }

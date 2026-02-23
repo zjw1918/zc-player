@@ -1,7 +1,8 @@
 const std = @import("std");
 const c = @import("../ffi/cplayer.zig").c;
 const Player = @import("../media/Player.zig").Player;
-const VideoInterop = @import("interop/VideoInterop.zig").VideoInterop;
+const VideoInteropMod = @import("interop/VideoInterop.zig");
+const VideoInterop = VideoInteropMod.VideoInterop;
 const SoftwareUploadBackendMod = @import("interop/SoftwareUploadBackend.zig");
 
 pub const VideoPipeline = struct {
@@ -49,7 +50,11 @@ pub const VideoPipeline = struct {
             return error.InitFailed;
         }
         self.initialized = true;
-        self.interop = VideoInterop.init(VideoInterop.selectionModeFromEnvironment()) catch {
+        const mode = VideoInterop.selectionModeFromEnvironment();
+        self.interop = VideoInterop.init(mode) catch |err| {
+            if (mode == .force_zero_copy) {
+                std.debug.print("[interop] init failed: {s}\n", .{VideoInteropMod.initErrorReason(err)});
+            }
             c.video_pipeline_destroy(&self.handle);
             self.initialized = false;
             return error.InitFailed;

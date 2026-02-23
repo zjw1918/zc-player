@@ -142,6 +142,10 @@ pub const PlaybackSession = struct {
         return self.video_pipeline.getFrameForRender(master_clock);
     }
 
+    pub fn reportTrueZeroCopySubmitResult(self: *PlaybackSession, success: bool) void {
+        self.video_pipeline.reportTrueZeroCopySubmitResult(success);
+    }
+
     fn destroyOutputs(self: *PlaybackSession) void {
         self.player.stopDemuxer();
         self.video_pipeline.destroy();

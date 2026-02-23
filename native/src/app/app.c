@@ -258,11 +258,17 @@ static int create_logical_device(App* app) {
 
     VkPhysicalDeviceFeatures device_features = {};
 
-    const char* device_extensions[2] = {0};
+    const char* device_extensions[6] = {0};
     uint32_t enabled_extension_count = 0;
     device_extensions[enabled_extension_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     if (app->portability_subset_supported) {
         device_extensions[enabled_extension_count++] = "VK_KHR_portability_subset";
+    }
+    if (has_device_extension(app->gpu, "VK_KHR_external_memory")) {
+        device_extensions[enabled_extension_count++] = "VK_KHR_external_memory";
+    }
+    if (has_device_extension(app->gpu, "VK_EXT_external_memory_metal")) {
+        device_extensions[enabled_extension_count++] = "VK_EXT_external_memory_metal";
     }
 
     VkDeviceCreateInfo device_create_info = {

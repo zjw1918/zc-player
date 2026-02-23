@@ -12,6 +12,8 @@ typedef struct {
     int linesizes[3];
     int plane_count;
     int format;
+    int source_hw;
+    uint64_t gpu_token;
     int width;
     int height;
     double pts;
@@ -38,6 +40,8 @@ typedef struct {
     int pending_linesizes[3];
     int pending_plane_count;
     int pending_format;
+    int pending_source_hw;
+    uint64_t pending_gpu_token;
     double pending_pts;
 
     double clock_base_pts;
@@ -60,7 +64,9 @@ int video_pipeline_get_frame_for_render(
     int* height,
     int* linesizes,
     int* plane_count,
-    int* format
+    int* format,
+    int* source_hw,
+    uint64_t* gpu_token
 );
 
 #endif

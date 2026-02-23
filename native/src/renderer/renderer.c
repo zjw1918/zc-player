@@ -1,12 +1,18 @@
 #include "renderer.h"
 #include "video/video_decoder.h"
+#include "renderer/apple_interop_bridge.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef __APPLE__
+#include <vulkan/vulkan_metal.h>
+#endif
+
 #define VIDEO_FORMAT_RGBA 0
 #define VIDEO_FORMAT_NV12 1
 #define VIDEO_FORMAT_YUV420P 2
+#define VIDEO_FORMAT_NV12_TRUE_SWAP 3
 
 typedef struct {
     int mode;
@@ -174,27 +180,28 @@ static void update_slot_descriptor(Renderer* ren, RendererVideoSlot* slot) {
     VkImageView y_view = slot->image_view;
     VkImageView uv_or_u_view = slot->uv_image_view ? slot->uv_image_view : slot->image_view;
     VkImageView v_view = slot->v_image_view ? slot->v_image_view : uv_or_u_view;
+    VkImageLayout sampled_layout = slot->imported_external ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkDescriptorImageInfo image_infos[4] = {
         {
             .sampler = ren->video_sampler,
             .imageView = rgba_view,
-            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .imageLayout = sampled_layout,
         },
         {
             .sampler = ren->video_sampler,
             .imageView = y_view,
-            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .imageLayout = sampled_layout,
         },
         {
             .sampler = ren->video_sampler,
             .imageView = uv_or_u_view,
-            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .imageLayout = sampled_layout,
         },
         {
             .sampler = ren->video_sampler,
             .imageView = v_view,
-            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .imageLayout = sampled_layout,
         },
     };
 
@@ -238,6 +245,15 @@ static void update_slot_descriptor(Renderer* ren, RendererVideoSlot* slot) {
 
 static void destroy_video_slot_resources(Renderer* ren, RendererVideoSlot* slot) {
     App* app = ren->app;
+
+    if (slot->imported_y_texture_token) {
+        apple_interop_release_mtl_texture(slot->imported_y_texture_token);
+        slot->imported_y_texture_token = 0;
+    }
+    if (slot->imported_uv_texture_token) {
+        apple_interop_release_mtl_texture(slot->imported_uv_texture_token);
+        slot->imported_uv_texture_token = 0;
+    }
 
     if (slot->staging_memory && slot->staging_mapped) {
         vkUnmapMemory(app->device, slot->staging_memory);
@@ -319,7 +335,151 @@ static void destroy_video_slot_resources(Renderer* ren, RendererVideoSlot* slot)
 
     slot->image_initialized = 0;
     slot->yuv_initialized = 0;
+    slot->imported_external = 0;
 }
+
+#ifdef __APPLE__
+static int create_imported_metal_texture_image(
+    App* app,
+    uint64_t texture_token,
+    int width,
+    int height,
+    VkFormat format,
+    VkImage* image,
+    VkDeviceMemory* image_memory,
+    VkImageView* image_view
+) {
+    if (texture_token == 0 || width <= 0 || height <= 0) {
+        return -1;
+    }
+
+    VkExternalMemoryImageCreateInfo external_image_info = {
+        .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+        .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLTEXTURE_BIT_EXT,
+    };
+
+    VkImageCreateInfo image_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .pNext = &external_image_info,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = format,
+        .extent = {(uint32_t)width, (uint32_t)height, 1},
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_GENERAL,
+    };
+
+    if (vkCreateImage(app->device, &image_info, NULL, image) != VK_SUCCESS) {
+        return -1;
+    }
+
+    VkMemoryRequirements mem_reqs;
+    vkGetImageMemoryRequirements(app->device, *image, &mem_reqs);
+
+    uint32_t memory_type_bits = mem_reqs.memoryTypeBits;
+    PFN_vkGetMemoryMetalHandlePropertiesEXT get_memory_metal_props =
+        (PFN_vkGetMemoryMetalHandlePropertiesEXT)vkGetDeviceProcAddr(app->device, "vkGetMemoryMetalHandlePropertiesEXT");
+    if (get_memory_metal_props != NULL) {
+        VkMemoryMetalHandlePropertiesEXT metal_props = {
+            .sType = VK_STRUCTURE_TYPE_MEMORY_METAL_HANDLE_PROPERTIES_EXT,
+        };
+        if (get_memory_metal_props(
+                app->device,
+                VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLTEXTURE_BIT_EXT,
+                (const void*)(uintptr_t)texture_token,
+                &metal_props) == VK_SUCCESS) {
+            memory_type_bits &= metal_props.memoryTypeBits;
+        }
+    }
+
+    uint32_t memory_type_index = find_memory_type(app, memory_type_bits, 0);
+    if (memory_type_index == UINT32_MAX) {
+        vkDestroyImage(app->device, *image, NULL);
+        *image = VK_NULL_HANDLE;
+        return -1;
+    }
+
+    VkImportMemoryMetalHandleInfoEXT import_mem_info = {
+        .sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_METAL_HANDLE_INFO_EXT,
+        .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLTEXTURE_BIT_EXT,
+        .handle = (void*)(uintptr_t)texture_token,
+    };
+    VkMemoryDedicatedAllocateInfo dedicated_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+        .pNext = &import_mem_info,
+        .image = *image,
+    };
+    VkMemoryAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = &dedicated_info,
+        .allocationSize = 0,
+        .memoryTypeIndex = memory_type_index,
+    };
+    if (vkAllocateMemory(app->device, &alloc_info, NULL, image_memory) != VK_SUCCESS) {
+        vkDestroyImage(app->device, *image, NULL);
+        *image = VK_NULL_HANDLE;
+        return -1;
+    }
+
+    if (vkBindImageMemory(app->device, *image, *image_memory, 0) != VK_SUCCESS) {
+        vkFreeMemory(app->device, *image_memory, NULL);
+        *image_memory = VK_NULL_HANDLE;
+        vkDestroyImage(app->device, *image, NULL);
+        *image = VK_NULL_HANDLE;
+        return -1;
+    }
+
+    VkImageViewCreateInfo view_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = *image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = format,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+
+    if (vkCreateImageView(app->device, &view_info, NULL, image_view) != VK_SUCCESS) {
+        vkFreeMemory(app->device, *image_memory, NULL);
+        *image_memory = VK_NULL_HANDLE;
+        vkDestroyImage(app->device, *image, NULL);
+        *image = VK_NULL_HANDLE;
+        return -1;
+    }
+
+    return 0;
+}
+
+static int import_video_slot_resources_nv12(Renderer* ren, RendererVideoSlot* slot, uint64_t y_texture_token, uint64_t uv_texture_token, int width, int height, int chroma_width, int chroma_height) {
+    vkDeviceWaitIdle(ren->app->device);
+    destroy_video_slot_resources(ren, slot);
+
+    if (create_imported_metal_texture_image(ren->app, y_texture_token, width, height, VK_FORMAT_R8_UNORM, &slot->image, &slot->image_memory, &slot->image_view) != 0) {
+        return -1;
+    }
+    if (create_imported_metal_texture_image(ren->app, uv_texture_token, chroma_width, chroma_height, VK_FORMAT_R8G8_UNORM, &slot->uv_image, &slot->uv_image_memory, &slot->uv_image_view) != 0) {
+        destroy_video_slot_resources(ren, slot);
+        return -1;
+    }
+
+    slot->imported_y_texture_token = y_texture_token;
+    slot->imported_uv_texture_token = uv_texture_token;
+    slot->imported_external = 1;
+
+    update_slot_descriptor(ren, slot);
+    slot->image_initialized = 1;
+    slot->yuv_initialized = 1;
+    return 0;
+}
+#endif
 
 static int create_video_slot_resources(Renderer* ren, RendererVideoSlot* slot, int width, int height) {
     if (create_video_plane_resources(ren->app, width, height, VK_FORMAT_R8G8B8A8_UNORM, &slot->image, &slot->image_memory, &slot->image_view, &slot->staging_buffer, &slot->staging_memory, &slot->staging_mapped) != 0) {
@@ -331,6 +491,7 @@ static int create_video_slot_resources(Renderer* ren, RendererVideoSlot* slot, i
 
     slot->yuv_initialized = 0;
     slot->image_initialized = 0;
+    slot->imported_external = 0;
     return 0;
 }
 
@@ -351,6 +512,7 @@ static int create_video_slot_resources_nv12(Renderer* ren, RendererVideoSlot* sl
 
     slot->yuv_initialized = 1;
     slot->image_initialized = 0;
+    slot->imported_external = 0;
     return 0;
 }
 
@@ -375,6 +537,7 @@ static int create_video_slot_resources_yuv420p(Renderer* ren, RendererVideoSlot*
 
     slot->yuv_initialized = 1;
     slot->image_initialized = 0;
+    slot->imported_external = 0;
     return 0;
 }
 
@@ -695,6 +858,7 @@ int renderer_init(Renderer* ren, App* app) {
     ren->video_width = 0;
     ren->video_height = 0;
     ren->video_format = VIDEO_FORMAT_RGBA;
+    ren->true_zero_copy_uv_swap = 0;
     return 0;
 
 fail:
@@ -883,6 +1047,7 @@ int renderer_upload_video(Renderer* ren, uint8_t* data, int width, int height, i
 
     slot->image_initialized = 1;
     ren->active_slot = slot_index;
+    ren->true_zero_copy_uv_swap = 0;
     ren->has_video = 1;
     return 0;
 }
@@ -1056,6 +1221,7 @@ int renderer_upload_video_nv12(Renderer* ren, uint8_t* y_plane, int y_linesize, 
     slot->image_initialized = 1;
     slot->yuv_initialized = 1;
     ren->active_slot = slot_index;
+    ren->true_zero_copy_uv_swap = 0;
     ren->has_video = 1;
     return 0;
 }
@@ -1280,6 +1446,7 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
     slot->image_initialized = 1;
     slot->yuv_initialized = 1;
     ren->active_slot = slot_index;
+    ren->true_zero_copy_uv_swap = 0;
     ren->has_video = 1;
     return 0;
 }
@@ -1294,10 +1461,6 @@ int renderer_submit_interop_handle(Renderer* ren, uint64_t handle_token, int wid
     }
 
     const RendererInteropHostFrame* frame = (const RendererInteropHostFrame*)(uintptr_t)handle_token;
-    if (frame->payload_kind == RENDERER_INTEROP_PAYLOAD_GPU) {
-        return renderer_submit_true_zero_copy_handle(ren, handle_token, width, height, format);
-    }
-
     if (frame->plane_count <= 0 || frame->planes[0] == NULL) {
         return -1;
     }
@@ -1351,15 +1514,59 @@ int renderer_submit_true_zero_copy_handle(Renderer* ren, uint64_t handle_token, 
         return -1;
     }
 
-    return renderer_upload_video_nv12(
-        ren,
-        frame->planes[0],
-        frame->linesizes[0],
-        frame->planes[1],
-        frame->linesizes[1],
-        width,
-        height
-    );
+#ifndef __APPLE__
+    return -1;
+#else
+    int y_width = 0;
+    int y_height = 0;
+    int uv_width = 0;
+    int uv_height = 0;
+
+    uint64_t y_texture_token = apple_interop_create_mtl_texture_from_avframe(frame->gpu_token, 0, &y_width, &y_height);
+    if (y_texture_token == 0) {
+        return -1;
+    }
+
+    uint64_t uv_texture_token = apple_interop_create_mtl_texture_from_avframe(frame->gpu_token, 1, &uv_width, &uv_height);
+    if (uv_texture_token == 0) {
+        apple_interop_release_mtl_texture(y_texture_token);
+        return -1;
+    }
+
+    if (ren->video_width != width || ren->video_height != height || ren->video_format != VIDEO_FORMAT_NV12) {
+        vkDeviceWaitIdle(ren->app->device);
+        if (recreate_video_resources(ren, width, height, VIDEO_FORMAT_NV12) != 0) {
+            apple_interop_release_mtl_texture(y_texture_token);
+            apple_interop_release_mtl_texture(uv_texture_token);
+            return -1;
+        }
+    }
+
+    const uint32_t slot_index = ren->app->current_frame % VIDEO_UPLOAD_SLOTS;
+    RendererVideoSlot* slot = &ren->video_slots[slot_index];
+
+    if (slot->upload_fence != VK_NULL_HANDLE) {
+        if (vkWaitForFences(ren->app->device, 1, &slot->upload_fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+            apple_interop_release_mtl_texture(y_texture_token);
+            apple_interop_release_mtl_texture(uv_texture_token);
+            return -1;
+        }
+    }
+
+    if (import_video_slot_resources_nv12(ren, slot, y_texture_token, uv_texture_token, width, height, uv_width, uv_height) != 0) {
+        apple_interop_release_mtl_texture(y_texture_token);
+        apple_interop_release_mtl_texture(uv_texture_token);
+        return -1;
+    }
+
+    ren->video_width = width;
+    ren->video_height = height;
+    ren->video_format = VIDEO_FORMAT_NV12;
+    ren->true_zero_copy_uv_swap = 1;
+    ren->active_slot = slot_index;
+    ren->has_video = 1;
+    return 0;
+#endif
 }
 
 void renderer_render(Renderer* ren) {
@@ -1426,7 +1633,7 @@ void renderer_render(Renderer* ren) {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ren->pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, ren->pipeline_layout, 0, 1, &slot->descriptor_set, 0, NULL);
     VideoPushConstants push_constants = {
-        .mode = ren->video_format,
+        .mode = ren->true_zero_copy_uv_swap ? VIDEO_FORMAT_NV12_TRUE_SWAP : ren->video_format,
     };
     vkCmdPushConstants(cmd, ren->pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push_constants), &push_constants);
     vkCmdDraw(cmd, 6, 1, 0, 0);

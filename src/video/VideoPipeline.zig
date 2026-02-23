@@ -59,6 +59,12 @@ pub const VideoPipeline = struct {
         return .none;
     }
 
+    pub fn reportTrueZeroCopySubmitResult(self: *VideoPipeline, success: bool) void {
+        if (self.interop) |*interop| {
+            interop.reportTrueZeroCopySubmitResult(success);
+        }
+    }
+
     pub fn init(self: *VideoPipeline, player: *Player) !void {
         if (c.video_pipeline_init(&self.handle, player.raw()) != 0) {
             return error.InitFailed;
@@ -114,6 +120,8 @@ pub const VideoPipeline = struct {
         var linesizes: [3]c_int = .{ 0, 0, 0 };
         var plane_count: c_int = 0;
         var format: c_int = c.VIDEO_FRAME_FORMAT_RGBA;
+        var source_hw: c_int = 0;
+        var gpu_token: u64 = 0;
 
         const ret = c.video_pipeline_get_frame_for_render(
             &self.handle,
@@ -124,6 +132,8 @@ pub const VideoPipeline = struct {
             &linesizes,
             &plane_count,
             &format,
+            &source_hw,
+            &gpu_token,
         );
 
         if (ret <= 0) {
@@ -131,7 +141,6 @@ pub const VideoPipeline = struct {
         }
 
         if (self.interop) |*interop| {
-            const source_hw = c.player_is_video_hw_enabled(self.handle.player) != 0;
             const software_frame = SoftwareUploadBackendMod.SoftwarePlaneFrame{
                 .planes = planes,
                 .linesizes = linesizes,
@@ -140,8 +149,8 @@ pub const VideoPipeline = struct {
                 .height = height,
                 .format = format,
                 .pts = master_clock,
-                .source_hw = source_hw,
-                .gpu_token = if (source_hw) c.player_get_video_hw_frame_token(self.handle.player) else 0,
+                .source_hw = source_hw != 0,
+                .gpu_token = if (source_hw != 0) gpu_token else 0,
             };
             interop.submitDecodedFrame(software_frame);
 

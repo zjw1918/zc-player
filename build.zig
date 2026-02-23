@@ -13,6 +13,7 @@ fn configureNativeDeps(b: *std.Build, step: *std.Build.Step.Compile) void {
         .files = &.{
             "native/src/app/app.c",
             "native/src/renderer/renderer.c",
+            "native/src/renderer/apple_interop_bridge.mm",
             "native/src/ui/ui.cpp",
             "third_party/imgui/imgui.cpp",
             "third_party/imgui/imgui_draw.cpp",
@@ -31,6 +32,13 @@ fn configureNativeDeps(b: *std.Build, step: *std.Build.Step.Compile) void {
     step.linkSystemLibrary("swscale");
     step.linkSystemLibrary("swresample");
     step.linkSystemLibrary("avutil");
+
+    if (step.rootModuleTarget().os.tag == .macos) {
+        step.linkFramework("Metal");
+        step.linkFramework("CoreVideo");
+        step.linkFramework("QuartzCore");
+        step.linkFramework("Foundation");
+    }
 }
 
 pub fn build(b: *std.Build) void {

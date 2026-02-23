@@ -114,6 +114,14 @@ pub const PlaybackEngine = struct {
         return self.session.getFrameForRender(master_clock);
     }
 
+    pub fn reportTrueZeroCopySubmitResult(self: *Self, success: bool) void {
+        if (!self.session_mutex.tryLock()) {
+            return;
+        }
+        defer self.session_mutex.unlock();
+        self.session.reportTrueZeroCopySubmitResult(success);
+    }
+
     fn resetSnapshot(self: *Self) void {
         self.snapshot_mutex.lock();
         defer self.snapshot_mutex.unlock();

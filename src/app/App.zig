@@ -65,7 +65,23 @@ fn toGuiFallbackReason(reason: VideoFallbackReason) c_int {
 }
 
 fn selectInteropSubmitPath(status: VideoBackendStatus) InteropSubmitPath {
+    if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZC_FORCE_INTEROP_HANDLE")) |value| {
+        defer std.heap.page_allocator.free(value);
+        if (std.mem.eql(u8, value, "1")) {
+            return .interop_handle;
+        }
+    } else |_| {}
+
     return if (status == .true_zero_copy) .true_zero_copy else .interop_handle;
+}
+
+fn isGpuInteropPayload(handle_token: u64) bool {
+    if (handle_token == 0) {
+        return false;
+    }
+
+    const frame: *const gui.RendererInteropHostFrame = @ptrFromInt(handle_token);
+    return frame.payload_kind == gui.RENDERER_INTEROP_PAYLOAD_GPU and frame.gpu_token != 0;
 }
 
 fn renderVideoCallback(userdata: ?*anyopaque) callconv(.c) void {
@@ -249,9 +265,12 @@ pub const App = struct {
                             }
                         },
                         .interop => |interop| {
-                            switch (selectInteropSubmitPath(snapshot.video_backend_status)) {
+                            const gpu_payload = isGpuInteropPayload(interop.token);
+                            var submit_result: c_int = -1;
+                            const path = selectInteropSubmitPath(snapshot.video_backend_status);
+                            switch (path) {
                                 .true_zero_copy => {
-                                    _ = gui.renderer_submit_true_zero_copy_handle(
+                                    submit_result = gui.renderer_submit_true_zero_copy_handle(
                                         &renderer,
                                         interop.token,
                                         interop.width,
@@ -260,7 +279,7 @@ pub const App = struct {
                                     );
                                 },
                                 .interop_handle => {
-                                    _ = gui.renderer_submit_interop_handle(
+                                    submit_result = gui.renderer_submit_interop_handle(
                                         &renderer,
                                         interop.token,
                                         interop.width,
@@ -268,6 +287,10 @@ pub const App = struct {
                                         @intFromEnum(interop.format),
                                     );
                                 },
+                            }
+
+                            if (gpu_payload) {
+                                self.engine.reportTrueZeroCopySubmitResult(path == .true_zero_copy and submit_result == 0);
                             }
                         },
                     }
@@ -334,8 +357,18 @@ test "toGuiFallbackReason maps interop fallback reasons" {
     try std.testing.expectEqual(@as(c_int, gui.VIDEO_FALLBACK_REASON_FORMAT_NOT_SUPPORTED), toGuiFallbackReason(.format_not_supported));
 }
 
-test "selectInteropSubmitPath chooses true-zero-copy only for active status" {
+test "selectInteropSubmitPath chooses true-zero-copy when active" {
     try std.testing.expectEqual(InteropSubmitPath.true_zero_copy, selectInteropSubmitPath(.true_zero_copy));
     try std.testing.expectEqual(InteropSubmitPath.interop_handle, selectInteropSubmitPath(.interop_handle));
     try std.testing.expectEqual(InteropSubmitPath.interop_handle, selectInteropSubmitPath(.software));
+}
+
+test "isGpuInteropPayload detects gpu-tagged interop frames" {
+    var frame: gui.RendererInteropHostFrame = std.mem.zeroes(gui.RendererInteropHostFrame);
+    frame.payload_kind = gui.RENDERER_INTEROP_PAYLOAD_GPU;
+    frame.gpu_token = 1;
+    try std.testing.expect(isGpuInteropPayload(@intFromPtr(&frame)));
+
+    frame.payload_kind = gui.RENDERER_INTEROP_PAYLOAD_HOST;
+    try std.testing.expect(!isGpuInteropPayload(@intFromPtr(&frame)));
 }

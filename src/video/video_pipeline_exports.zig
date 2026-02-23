@@ -59,6 +59,8 @@ fn queuePushLocked(
     width: c_int,
     height: c_int,
     format: c_int,
+    source_hw: c_int,
+    gpu_token: u64,
     pts: f64,
 ) c_int {
     if (pipeline.count >= frameCapacity()) {
@@ -102,6 +104,8 @@ fn queuePushLocked(
     }
 
     frame.format = format;
+    frame.source_hw = source_hw;
+    frame.gpu_token = gpu_token;
     frame.plane_count = expected_plane_count;
     frame.pts = pts;
     pipeline.tail = @mod(pipeline.tail + 1, frameCapacity());
@@ -141,6 +145,8 @@ fn queuePopToUploadLocked(pipeline: *c.VideoPipeline) c_int {
     pipeline.pending_linesizes[2] = frame.linesizes[2];
     pipeline.pending_plane_count = frame.plane_count;
     pipeline.pending_format = frame.format;
+    pipeline.pending_source_hw = frame.source_hw;
+    pipeline.pending_gpu_token = frame.gpu_token;
     pipeline.pending_pts = frame.pts;
     pipeline.have_pending_upload = 1;
 
@@ -225,6 +231,8 @@ fn decodeThreadMain(userdata: ?*anyopaque) callconv(.c) c_int {
         }
 
         const format = c.player_get_video_format(pipeline.player);
+        const source_hw = c.player_is_video_hw_enabled(pipeline.player);
+        const gpu_token = c.player_get_video_hw_frame_token(pipeline.player);
         const expected_plane_count = planeCountForFormat(format);
         var planes: [3][*c]u8 = .{ null, null, null };
         var linesizes: [3]c_int = .{ 0, 0, 0 };
@@ -253,7 +261,7 @@ fn decodeThreadMain(userdata: ?*anyopaque) callconv(.c) c_int {
             }
 
             const adjusted_pts = pts - pipeline.pts_offset;
-            if (queuePushLocked(pipeline, &planes, &linesizes, plane_count, pipeline.player.*.width, pipeline.player.*.height, format, adjusted_pts) != 0) {
+            if (queuePushLocked(pipeline, &planes, &linesizes, plane_count, pipeline.player.*.width, pipeline.player.*.height, format, source_hw, gpu_token, adjusted_pts) != 0) {
                 _ = c.SDL_UnlockMutex(pipeline.queue_mutex);
                 c.SDL_Delay(1);
                 continue;
@@ -405,6 +413,8 @@ pub export fn video_pipeline_reset(pipeline: ?*c.VideoPipeline) void {
     p.pending_linesizes[2] = 0;
     p.pending_plane_count = 0;
     p.pending_format = c.VIDEO_FRAME_FORMAT_RGBA;
+    p.pending_source_hw = 0;
+    p.pending_gpu_token = 0;
     p.pending_pts = 0.0;
     p.clock_base_pts = -1.0;
     p.clock_base_time_ns = 0;
@@ -462,6 +472,8 @@ pub export fn video_pipeline_destroy(pipeline: ?*c.VideoPipeline) void {
     p.count = 0;
     p.decode_running = 0;
     p.have_pending_upload = 0;
+    p.pending_source_hw = 0;
+    p.pending_gpu_token = 0;
     p.clock_base_pts = -1.0;
     p.clock_base_time_ns = 0;
     p.expected_start_pts = 0.0;
@@ -478,8 +490,10 @@ pub export fn video_pipeline_get_frame_for_render(
     linesizes: [*c]c_int,
     plane_count: [*c]c_int,
     format: [*c]c_int,
+    source_hw: [*c]c_int,
+    gpu_token: [*c]u64,
 ) c_int {
-    if (pipeline == null or planes == null or width == null or height == null or linesizes == null or plane_count == null or format == null) {
+    if (pipeline == null or planes == null or width == null or height == null or linesizes == null or plane_count == null or format == null or source_hw == null or gpu_token == null) {
         return -1;
     }
 
@@ -519,6 +533,8 @@ pub export fn video_pipeline_get_frame_for_render(
         linesizes[2] = p.pending_linesizes[2];
         plane_count.* = p.pending_plane_count;
         format.* = p.pending_format;
+        source_hw.* = p.pending_source_hw;
+        gpu_token.* = p.pending_gpu_token;
         p.have_pending_upload = 0;
         return 1;
     }
@@ -538,7 +554,7 @@ test "queuePushLocked records frame format metadata" {
     pipeline.frames[0].width = 2;
     pipeline.frames[0].height = 1;
 
-    try std.testing.expectEqual(@as(c_int, 0), queuePushLocked(&pipeline, &src_planes, &src_linesizes, 1, 2, 1, c.VIDEO_FRAME_FORMAT_RGBA, 1.5));
+    try std.testing.expectEqual(@as(c_int, 0), queuePushLocked(&pipeline, &src_planes, &src_linesizes, 1, 2, 1, c.VIDEO_FRAME_FORMAT_RGBA, 0, 0, 1.5));
     try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_RGBA), pipeline.frames[0].format);
     try std.testing.expectEqual(@as(c_int, 1), pipeline.frames[0].plane_count);
 }
@@ -585,6 +601,8 @@ test "queuePopToUploadLocked preserves multi-plane pending metadata" {
     pipeline.frames[0].linesizes[1] = 640;
     pipeline.frames[0].plane_count = 2;
     pipeline.frames[0].format = c.VIDEO_FRAME_FORMAT_NV12;
+    pipeline.frames[0].source_hw = 1;
+    pipeline.frames[0].gpu_token = 0xdeadbeef;
     pipeline.frames[0].pts = 2.5;
     pipeline.upload_planes[0] = upload_y_ptr;
     pipeline.upload_planes[1] = upload_uv_ptr;
@@ -593,6 +611,8 @@ test "queuePopToUploadLocked preserves multi-plane pending metadata" {
 
     try std.testing.expectEqual(@as(c_int, 0), queuePopToUploadLocked(&pipeline));
     try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_NV12), pipeline.pending_format);
+    try std.testing.expectEqual(@as(c_int, 1), pipeline.pending_source_hw);
+    try std.testing.expectEqual(@as(u64, 0xdeadbeef), pipeline.pending_gpu_token);
     try std.testing.expectEqual(@as(c_int, 2), pipeline.pending_plane_count);
     try std.testing.expectEqual(@as(c_int, 640), pipeline.pending_linesizes[0]);
     try std.testing.expectEqual(@as(c_int, 640), pipeline.pending_linesizes[1]);

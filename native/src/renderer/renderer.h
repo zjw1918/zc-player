@@ -46,6 +46,9 @@ typedef struct {
     VkCommandBuffer upload_cmd;
     VkFence upload_fence;
     VkDescriptorSet descriptor_set;
+    uint64_t imported_y_texture_token;
+    uint64_t imported_uv_texture_token;
+    int imported_external;
     int image_initialized;
     int yuv_initialized;
 } RendererVideoSlot;
@@ -67,6 +70,7 @@ typedef struct {
     int video_width;
     int video_height;
     int video_format;
+    int true_zero_copy_uv_swap;
     int has_video;
 } Renderer;
 

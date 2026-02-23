@@ -71,6 +71,21 @@ static void format_time(double seconds, char* out, size_t out_size) {
     }
 }
 
+static const char* backend_status_label(int status) {
+    switch (status) {
+        case VIDEO_BACKEND_STATUS_SOFTWARE:
+            return "software";
+        case VIDEO_BACKEND_STATUS_INTEROP_HANDLE:
+            return "interop-handle";
+        case VIDEO_BACKEND_STATUS_TRUE_ZERO_COPY:
+            return "true-zero-copy";
+        case VIDEO_BACKEND_STATUS_FORCE_ZERO_COPY_BLOCKED:
+            return "force-zero-copy-blocked";
+        default:
+            return "unknown";
+    }
+}
+
 static void SDLCALL open_file_dialog_callback(void* userdata, const char* const* filelist, int filter) {
     (void)filter;
 
@@ -332,7 +347,9 @@ void ui_render(UIState* ui, const PlaybackSnapshot* snapshot) {
             queue_action(UI_ACTION_SET_SPEED, (double)speed);
         }
 
-        ImGui::TextUnformatted("Space Play/Pause  Left/Right Seek  Up/Down Volume");
+        ImGui::Text("Backend: %s", backend_status_label(snapshot->video_backend_status));
+        ImGui::SameLine();
+        ImGui::TextUnformatted("  Space Play/Pause  Left/Right Seek  Up/Down Volume");
     }
     ImGui::End();
     ImGui::PopStyleVar(4);

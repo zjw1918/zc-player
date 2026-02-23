@@ -31,6 +31,13 @@ pub const Capabilities = struct {
 
 pub const InitError = error{UnsupportedZeroCopy};
 
+pub const RuntimeStatus = enum {
+    software,
+    interop_handle,
+    true_zero_copy,
+    force_zero_copy_blocked,
+};
+
 pub fn initErrorReason(err: InitError) []const u8 {
     return switch (err) {
         error.UnsupportedZeroCopy => "force_zero_copy requested, but true zero-copy backend is not available on this platform/runtime",
@@ -48,6 +55,7 @@ pub const VideoInterop = struct {
     submit_success_count: u64,
     submit_failure_count: u64,
     acquire_failure_count: u64,
+    force_zero_copy_blocked: bool,
 
     pub fn init(mode: SelectionMode) InitError!VideoInterop {
         var interop = VideoInterop{
@@ -61,10 +69,14 @@ pub const VideoInterop = struct {
             .submit_success_count = 0,
             .submit_failure_count = 0,
             .acquire_failure_count = 0,
+            .force_zero_copy_blocked = false,
         };
         interop.software.init();
         interop.mac_backend.init();
-        interop.kind = try interop.resolveBackendKind();
+        interop.kind = interop.resolveBackendKind() catch |err| {
+            interop.force_zero_copy_blocked = err == error.UnsupportedZeroCopy;
+            return err;
+        };
         return interop;
     }
 
@@ -124,6 +136,19 @@ pub const VideoInterop = struct {
             return false;
         }
         return value.?[0] != 0 and value.?[0] != '0';
+    }
+
+    pub fn runtimeStatus(self: *const VideoInterop) RuntimeStatus {
+        if (self.force_zero_copy_blocked) {
+            return .force_zero_copy_blocked;
+        }
+
+        if (self.kind == .macos_videotoolbox) {
+            const caps = self.mac_backend.capabilities();
+            return if (caps.true_zero_copy) .true_zero_copy else .interop_handle;
+        }
+
+        return .software;
     }
 
     pub fn capabilities(self: *const VideoInterop) Capabilities {

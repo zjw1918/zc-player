@@ -30,6 +30,13 @@ typedef struct {
     char path[1024];
 } PlaybackCommand;
 
+typedef enum {
+    VIDEO_BACKEND_STATUS_SOFTWARE = 0,
+    VIDEO_BACKEND_STATUS_INTEROP_HANDLE = 1,
+    VIDEO_BACKEND_STATUS_TRUE_ZERO_COPY = 2,
+    VIDEO_BACKEND_STATUS_FORCE_ZERO_COPY_BLOCKED = 3,
+} VideoBackendStatus;
+
 typedef struct {
     PlayerState state;
     double current_time;
@@ -37,6 +44,7 @@ typedef struct {
     double volume;
     double playback_speed;
     int has_media;
+    int video_backend_status;
 } PlaybackSnapshot;
 
 typedef struct {

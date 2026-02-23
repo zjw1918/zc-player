@@ -45,6 +45,13 @@ pub const VideoPipeline = struct {
     initialized: bool = false,
     interop: ?VideoInterop = null,
 
+    pub fn interopStatus(self: *const VideoPipeline) VideoInteropMod.RuntimeStatus {
+        if (self.interop) |*interop| {
+            return interop.runtimeStatus();
+        }
+        return .software;
+    }
+
     pub fn init(self: *VideoPipeline, player: *Player) !void {
         if (c.video_pipeline_init(&self.handle, player.raw()) != 0) {
             return error.InitFailed;

@@ -1,6 +1,8 @@
+const std = @import("std");
 const c = @import("../ffi/cplayer.zig").c;
 const Player = @import("../media/Player.zig").Player;
 const VideoInterop = @import("interop/VideoInterop.zig").VideoInterop;
+const SoftwareUploadBackendMod = @import("interop/SoftwareUploadBackend.zig");
 
 pub const VideoPipeline = struct {
     pub const FrameFormat = enum(c_int) {
@@ -17,6 +19,14 @@ pub const VideoPipeline = struct {
         height: c_int,
         format: FrameFormat,
     };
+
+    fn frameFormatFromTag(format: c_int) FrameFormat {
+        return switch (format) {
+            c.VIDEO_FRAME_FORMAT_NV12 => .nv12,
+            c.VIDEO_FRAME_FORMAT_YUV420P => .yuv420p,
+            else => .rgba,
+        };
+    }
 
     handle: c.VideoPipeline = undefined,
     initialized: bool = false,
@@ -85,17 +95,50 @@ pub const VideoPipeline = struct {
             return null;
         }
 
+        if (self.interop) |*interop| {
+            const software_frame = SoftwareUploadBackendMod.SoftwarePlaneFrame{
+                .planes = planes,
+                .linesizes = linesizes,
+                .plane_count = plane_count,
+                .width = width,
+                .height = height,
+                .format = format,
+                .pts = master_clock,
+            };
+            interop.submitDecodedFrame(software_frame);
+
+            if (interop.acquireRenderableFrame()) |frame| {
+                switch (frame) {
+                    .software_planes => |sw| {
+                        return VideoFrame{
+                            .planes = sw.planes,
+                            .linesizes = sw.linesizes,
+                            .plane_count = sw.plane_count,
+                            .width = sw.width,
+                            .height = sw.height,
+                            .format = frameFormatFromTag(sw.format),
+                        };
+                    },
+                    .interop_handle => {
+                        return null;
+                    },
+                }
+            }
+        }
+
         return VideoFrame{
             .planes = planes,
             .linesizes = linesizes,
             .plane_count = plane_count,
             .width = width,
             .height = height,
-            .format = switch (format) {
-                c.VIDEO_FRAME_FORMAT_NV12 => .nv12,
-                c.VIDEO_FRAME_FORMAT_YUV420P => .yuv420p,
-                else => .rgba,
-            },
+            .format = frameFormatFromTag(format),
         };
     }
 };
+
+test "frameFormatFromTag maps known formats" {
+    try std.testing.expectEqual(VideoPipeline.FrameFormat.rgba, VideoPipeline.frameFormatFromTag(c.VIDEO_FRAME_FORMAT_RGBA));
+    try std.testing.expectEqual(VideoPipeline.FrameFormat.nv12, VideoPipeline.frameFormatFromTag(c.VIDEO_FRAME_FORMAT_NV12));
+    try std.testing.expectEqual(VideoPipeline.FrameFormat.yuv420p, VideoPipeline.frameFormatFromTag(c.VIDEO_FRAME_FORMAT_YUV420P));
+}

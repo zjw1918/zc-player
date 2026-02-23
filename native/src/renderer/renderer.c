@@ -1281,6 +1281,20 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
     return 0;
 }
 
+int renderer_submit_interop_handle(Renderer* ren, uint64_t handle_token, int width, int height, int format) {
+    (void)handle_token;
+
+    if (ren == NULL || width <= 0 || height <= 0) {
+        return -1;
+    }
+
+    /* Placeholder entrypoint for future zero-copy render path wiring. */
+    ren->video_width = width;
+    ren->video_height = height;
+    ren->video_format = format;
+    return -1;
+}
+
 void renderer_render(Renderer* ren) {
     if (!ren->has_video) {
         return;

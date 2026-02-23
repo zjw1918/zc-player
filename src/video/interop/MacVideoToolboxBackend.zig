@@ -1,5 +1,6 @@
 const builtin = @import("builtin");
 const std = @import("std");
+const SoftwareUploadBackendMod = @import("SoftwareUploadBackend.zig");
 
 const c = @cImport({
     @cInclude("libavutil/hwcontext.h");
@@ -17,6 +18,10 @@ pub const SubmitError = error{
 
 pub const AcquireError = error{
     NotSupported,
+};
+
+pub const InteropHandle = struct {
+    token: u64,
 };
 
 pub const MacVideoToolboxBackend = struct {
@@ -43,11 +48,11 @@ pub const MacVideoToolboxBackend = struct {
         };
     }
 
-    pub fn submitDecodedFrame(_: *MacVideoToolboxBackend) SubmitError!void {
+    pub fn submitDecodedFrame(_: *MacVideoToolboxBackend, _: SoftwareUploadBackendMod.SoftwarePlaneFrame) SubmitError!void {
         return error.NotSupported;
     }
 
-    pub fn acquireRenderableFrame(_: *MacVideoToolboxBackend) AcquireError!void {
+    pub fn acquireRenderableFrame(_: *MacVideoToolboxBackend) AcquireError!?InteropHandle {
         return error.NotSupported;
     }
 };

@@ -33,6 +33,12 @@ pub const VideoInterop = struct {
     mode: SelectionMode,
     software: SoftwareUploadBackendMod.SoftwareUploadBackend,
     mac_backend: MacVideoToolboxBackendMod.MacVideoToolboxBackend,
+    fallback_switches: u32,
+    consecutive_failures: u32,
+    failure_threshold: u32,
+    submit_success_count: u64,
+    submit_failure_count: u64,
+    acquire_failure_count: u64,
 
     pub fn init(mode: SelectionMode) VideoInterop {
         var interop = VideoInterop{
@@ -40,6 +46,12 @@ pub const VideoInterop = struct {
             .mode = mode,
             .software = .{},
             .mac_backend = .{},
+            .fallback_switches = 0,
+            .consecutive_failures = 0,
+            .failure_threshold = 3,
+            .submit_success_count = 0,
+            .submit_failure_count = 0,
+            .acquire_failure_count = 0,
         };
         interop.software.init();
         interop.mac_backend.init();
@@ -80,6 +92,28 @@ pub const VideoInterop = struct {
         self.software.deinit();
     }
 
+    fn recordFailure(self: *VideoInterop) void {
+        self.submit_failure_count += 1;
+        self.consecutive_failures += 1;
+        if (self.kind == .macos_videotoolbox and self.consecutive_failures >= self.failure_threshold) {
+            self.kind = .software_upload;
+            self.fallback_switches += 1;
+        }
+    }
+
+    fn recordSuccess(self: *VideoInterop) void {
+        self.consecutive_failures = 0;
+        self.submit_success_count += 1;
+    }
+
+    pub fn diagnosticsEnabled() bool {
+        const value = std.posix.getenv("ZC_DEBUG_INTEROP");
+        if (value == null) {
+            return false;
+        }
+        return value.?[0] != 0 and value.?[0] != '0';
+    }
+
     pub fn capabilities(self: *const VideoInterop) Capabilities {
         const caps = switch (self.kind) {
             .software_upload => self.software.capabilities(),
@@ -101,9 +135,30 @@ pub const VideoInterop = struct {
 
     pub fn submitDecodedFrame(self: *VideoInterop, frame: SoftwareUploadBackendMod.SoftwarePlaneFrame) void {
         self.software.submitDecodedFrame(frame);
+
+        if (self.kind == .macos_videotoolbox) {
+            self.mac_backend.submitDecodedFrame(frame) catch {
+                self.recordFailure();
+                return;
+            };
+            self.recordSuccess();
+        }
     }
 
     pub fn acquireRenderableFrame(self: *VideoInterop) ?RenderableFrame {
+        if (self.kind == .macos_videotoolbox) {
+            const maybe_handle = self.mac_backend.acquireRenderableFrame() catch {
+                self.acquire_failure_count += 1;
+                self.recordFailure();
+                return null;
+            };
+
+            if (maybe_handle) |handle| {
+                self.recordSuccess();
+                return .{ .interop_handle = .{ .token = handle.token } };
+            }
+        }
+
         if (self.software.acquireRenderableFrame()) |frame| {
             return .{ .software_planes = frame };
         }
@@ -138,4 +193,34 @@ test "force software mode never selects zero-copy backend" {
     var interop = VideoInterop.init(.force_software);
     defer interop.deinit();
     try std.testing.expectEqual(BackendKind.software_upload, interop.kind);
+}
+
+test "interop falls back to software after repeated backend failures" {
+    var interop = VideoInterop.init(.auto);
+    defer interop.deinit();
+
+    if (interop.kind != .macos_videotoolbox) {
+        return;
+    }
+
+    const frame = SoftwareUploadBackendMod.SoftwarePlaneFrame{
+        .planes = .{ null, null, null },
+        .linesizes = .{ 0, 0, 0 },
+        .plane_count = 1,
+        .width = 1,
+        .height = 1,
+        .format = 0,
+        .pts = 0.0,
+    };
+
+    interop.submitDecodedFrame(frame);
+    interop.submitDecodedFrame(frame);
+    interop.submitDecodedFrame(frame);
+
+    try std.testing.expectEqual(BackendKind.software_upload, interop.kind);
+    try std.testing.expect(interop.fallback_switches >= 1);
+}
+
+test "interop diagnostics default to disabled" {
+    try std.testing.expect(!VideoInterop.diagnosticsEnabled());
 }

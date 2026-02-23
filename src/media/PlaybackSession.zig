@@ -1,9 +1,10 @@
 const std = @import("std");
 const Snapshot = @import("../engine/Snapshot.zig").Snapshot;
+const VideoBackendStatus = @import("../engine/Snapshot.zig").VideoBackendStatus;
 const Player = @import("Player.zig").Player;
 const AudioOutput = @import("../audio/AudioOutput.zig").AudioOutput;
 const VideoPipeline = @import("../video/VideoPipeline.zig").VideoPipeline;
-const VideoFrame = VideoPipeline.VideoFrame;
+const RenderFrame = VideoPipeline.RenderFrame;
 
 pub const PlaybackSession = struct {
     allocator: std.mem.Allocator,
@@ -109,6 +110,13 @@ pub const PlaybackSession = struct {
     }
 
     pub fn snapshot(self: *PlaybackSession) Snapshot {
+        const interop_status: VideoBackendStatus = switch (self.video_pipeline.interopStatus()) {
+            .software => .software,
+            .interop_handle => .interop_handle,
+            .true_zero_copy => .true_zero_copy,
+            .force_zero_copy_blocked => .force_zero_copy_blocked,
+        };
+
         return Snapshot{
             .state = self.player.state(),
             .current_time = self.player.currentTime(),
@@ -116,10 +124,11 @@ pub const PlaybackSession = struct {
             .volume = self.player.volume(),
             .playback_speed = self.player.playbackSpeed(),
             .has_media = self.player.hasMedia(),
+            .video_backend_status = interop_status,
         };
     }
 
-    pub fn getFrameForRender(self: *PlaybackSession, master_clock: f64) ?VideoFrame {
+    pub fn getFrameForRender(self: *PlaybackSession, master_clock: f64) ?RenderFrame {
         return self.video_pipeline.getFrameForRender(master_clock);
     }
 

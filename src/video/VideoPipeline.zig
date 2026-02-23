@@ -1,5 +1,9 @@
+const std = @import("std");
 const c = @import("../ffi/cplayer.zig").c;
 const Player = @import("../media/Player.zig").Player;
+const VideoInteropMod = @import("interop/VideoInterop.zig");
+const VideoInterop = VideoInteropMod.VideoInterop;
+const SoftwareUploadBackendMod = @import("interop/SoftwareUploadBackend.zig");
 
 pub const VideoPipeline = struct {
     pub const FrameFormat = enum(c_int) {
@@ -17,14 +21,51 @@ pub const VideoPipeline = struct {
         format: FrameFormat,
     };
 
+    pub const InteropFrame = struct {
+        token: u64,
+        width: c_int,
+        height: c_int,
+        format: FrameFormat,
+    };
+
+    pub const RenderFrame = union(enum) {
+        software: VideoFrame,
+        interop: InteropFrame,
+    };
+
+    fn frameFormatFromTag(format: c_int) FrameFormat {
+        return switch (format) {
+            c.VIDEO_FRAME_FORMAT_NV12 => .nv12,
+            c.VIDEO_FRAME_FORMAT_YUV420P => .yuv420p,
+            else => .rgba,
+        };
+    }
+
     handle: c.VideoPipeline = undefined,
     initialized: bool = false,
+    interop: ?VideoInterop = null,
+
+    pub fn interopStatus(self: *const VideoPipeline) VideoInteropMod.RuntimeStatus {
+        if (self.interop) |*interop| {
+            return interop.runtimeStatus();
+        }
+        return .software;
+    }
 
     pub fn init(self: *VideoPipeline, player: *Player) !void {
         if (c.video_pipeline_init(&self.handle, player.raw()) != 0) {
             return error.InitFailed;
         }
         self.initialized = true;
+        const mode = VideoInterop.selectionModeFromEnvironment();
+        self.interop = VideoInterop.init(mode) catch |err| {
+            if (mode == .force_zero_copy) {
+                std.debug.print("[interop] init failed: {s}\n", .{VideoInteropMod.initErrorReason(err)});
+            }
+            c.video_pipeline_destroy(&self.handle);
+            self.initialized = false;
+            return error.InitFailed;
+        };
     }
 
     pub fn start(self: *VideoPipeline) !void {
@@ -41,6 +82,10 @@ pub const VideoPipeline = struct {
             return;
         }
         c.video_pipeline_destroy(&self.handle);
+        if (self.interop) |*interop| {
+            interop.deinit();
+        }
+        self.interop = null;
         self.initialized = false;
     }
 
@@ -51,7 +96,7 @@ pub const VideoPipeline = struct {
         c.video_pipeline_reset(&self.handle);
     }
 
-    pub fn getFrameForRender(self: *VideoPipeline, master_clock: f64) ?VideoFrame {
+    pub fn getFrameForRender(self: *VideoPipeline, master_clock: f64) ?RenderFrame {
         if (!self.initialized) {
             return null;
         }
@@ -78,17 +123,54 @@ pub const VideoPipeline = struct {
             return null;
         }
 
-        return VideoFrame{
+        if (self.interop) |*interop| {
+            const software_frame = SoftwareUploadBackendMod.SoftwarePlaneFrame{
+                .planes = planes,
+                .linesizes = linesizes,
+                .plane_count = plane_count,
+                .width = width,
+                .height = height,
+                .format = format,
+                .pts = master_clock,
+                .source_hw = c.player_is_video_hw_enabled(self.handle.player) != 0,
+            };
+            interop.submitDecodedFrame(software_frame);
+
+            if (interop.acquireRenderableFrame()) |frame| {
+                switch (frame) {
+                    .software_planes => |sw| {
+                        return .{ .software = .{
+                            .planes = sw.planes,
+                            .linesizes = sw.linesizes,
+                            .plane_count = sw.plane_count,
+                            .width = sw.width,
+                            .height = sw.height,
+                            .format = frameFormatFromTag(sw.format),
+                        } };
+                    },
+                    .interop_handle => |handle| return .{ .interop = .{
+                        .token = handle.token,
+                        .width = width,
+                        .height = height,
+                        .format = frameFormatFromTag(format),
+                    } },
+                }
+            }
+        }
+
+        return .{ .software = .{
             .planes = planes,
             .linesizes = linesizes,
             .plane_count = plane_count,
             .width = width,
             .height = height,
-            .format = switch (format) {
-                c.VIDEO_FRAME_FORMAT_NV12 => .nv12,
-                c.VIDEO_FRAME_FORMAT_YUV420P => .yuv420p,
-                else => .rgba,
-            },
-        };
+            .format = frameFormatFromTag(format),
+        } };
     }
 };
+
+test "frameFormatFromTag maps known formats" {
+    try std.testing.expectEqual(VideoPipeline.FrameFormat.rgba, VideoPipeline.frameFormatFromTag(c.VIDEO_FRAME_FORMAT_RGBA));
+    try std.testing.expectEqual(VideoPipeline.FrameFormat.nv12, VideoPipeline.frameFormatFromTag(c.VIDEO_FRAME_FORMAT_NV12));
+    try std.testing.expectEqual(VideoPipeline.FrameFormat.yuv420p, VideoPipeline.frameFormatFromTag(c.VIDEO_FRAME_FORMAT_YUV420P));
+}

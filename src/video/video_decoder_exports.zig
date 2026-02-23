@@ -475,6 +475,14 @@ pub export fn video_decoder_get_format(dec: ?*c.VideoDecoder) c_int {
     return decodeFormatTag(pix_fmt);
 }
 
+pub export fn video_decoder_is_hw_enabled(dec: ?*c.VideoDecoder) c_int {
+    if (dec == null) {
+        return 0;
+    }
+
+    return dec.?.hw_enabled;
+}
+
 pub export fn video_decoder_get_planes(
     dec: ?*c.VideoDecoder,
     planes: [*c][*c]u8,

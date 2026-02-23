@@ -8,6 +8,16 @@
 #define VIDEO_UPLOAD_SLOTS 3
 
 typedef struct {
+    uint8_t* planes[3];
+    int linesizes[3];
+    int plane_count;
+    int width;
+    int height;
+    int format;
+    int source_is_hw;
+} RendererInteropHostFrame;
+
+typedef struct {
     VkImage image;
     VkDeviceMemory image_memory;
     VkImageView image_view;
@@ -58,6 +68,7 @@ void renderer_destroy(Renderer* ren);
 int renderer_upload_video(Renderer* ren, uint8_t* data, int width, int height, int linesize);
 int renderer_upload_video_nv12(Renderer* ren, uint8_t* y_plane, int y_linesize, uint8_t* uv_plane, int uv_linesize, int width, int height);
 int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesize, uint8_t* u_plane, int u_linesize, uint8_t* v_plane, int v_linesize, int width, int height);
+int renderer_submit_interop_handle(Renderer* ren, uint64_t handle_token, int width, int height, int format);
 int renderer_recreate_for_swapchain(Renderer* ren);
 void renderer_render(Renderer* ren);
 

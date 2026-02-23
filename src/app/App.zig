@@ -2,6 +2,7 @@ const std = @import("std");
 const PlaybackEngine = @import("../engine/PlaybackEngine.zig").PlaybackEngine;
 const SnapshotMod = @import("../engine/Snapshot.zig");
 const PlaybackState = SnapshotMod.PlaybackState;
+const VideoBackendStatus = SnapshotMod.VideoBackendStatus;
 const gui = @import("../ffi/gui.zig").c;
 
 const UploadPath = enum {
@@ -36,6 +37,15 @@ fn toGuiPlayerState(state: PlaybackState) gui.PlayerState {
     };
 
     return playerStateFromValue(value);
+}
+
+fn toGuiBackendStatus(status: VideoBackendStatus) c_int {
+    return switch (status) {
+        .software => gui.VIDEO_BACKEND_STATUS_SOFTWARE,
+        .interop_handle => gui.VIDEO_BACKEND_STATUS_INTEROP_HANDLE,
+        .true_zero_copy => gui.VIDEO_BACKEND_STATUS_TRUE_ZERO_COPY,
+        .force_zero_copy_blocked => gui.VIDEO_BACKEND_STATUS_FORCE_ZERO_COPY_BLOCKED,
+    };
 }
 
 fn renderVideoCallback(userdata: ?*anyopaque) callconv(.c) void {
@@ -179,39 +189,52 @@ pub const App = struct {
 
             if (snapshot.state == .playing) {
                 if (self.engine.getFrameForRender(snapshot.current_time)) |frame| {
-                    const path = selectUploadPath(@intFromEnum(frame.format), frame.plane_count);
-                    switch (path) {
-                        .nv12 => {
-                            _ = gui.renderer_upload_video_nv12(
-                                &renderer,
-                                frame.planes[0],
-                                frame.linesizes[0],
-                                frame.planes[1],
-                                frame.linesizes[1],
-                                frame.width,
-                                frame.height,
-                            );
+                    switch (frame) {
+                        .software => |sw| {
+                            const path = selectUploadPath(@intFromEnum(sw.format), sw.plane_count);
+                            switch (path) {
+                                .nv12 => {
+                                    _ = gui.renderer_upload_video_nv12(
+                                        &renderer,
+                                        sw.planes[0],
+                                        sw.linesizes[0],
+                                        sw.planes[1],
+                                        sw.linesizes[1],
+                                        sw.width,
+                                        sw.height,
+                                    );
+                                },
+                                .yuv420p => {
+                                    _ = gui.renderer_upload_video_yuv420p(
+                                        &renderer,
+                                        sw.planes[0],
+                                        sw.linesizes[0],
+                                        sw.planes[1],
+                                        sw.linesizes[1],
+                                        sw.planes[2],
+                                        sw.linesizes[2],
+                                        sw.width,
+                                        sw.height,
+                                    );
+                                },
+                                .rgba => {
+                                    _ = gui.renderer_upload_video(
+                                        &renderer,
+                                        sw.planes[0],
+                                        sw.width,
+                                        sw.height,
+                                        sw.linesizes[0],
+                                    );
+                                },
+                            }
                         },
-                        .yuv420p => {
-                            _ = gui.renderer_upload_video_yuv420p(
+                        .interop => |interop| {
+                            _ = gui.renderer_submit_interop_handle(
                                 &renderer,
-                                frame.planes[0],
-                                frame.linesizes[0],
-                                frame.planes[1],
-                                frame.linesizes[1],
-                                frame.planes[2],
-                                frame.linesizes[2],
-                                frame.width,
-                                frame.height,
-                            );
-                        },
-                        .rgba => {
-                            _ = gui.renderer_upload_video(
-                                &renderer,
-                                frame.planes[0],
-                                frame.width,
-                                frame.height,
-                                frame.linesizes[0],
+                                interop.token,
+                                interop.width,
+                                interop.height,
+                                @intFromEnum(interop.format),
                             );
                         },
                     }
@@ -225,6 +248,7 @@ pub const App = struct {
                 .volume = snapshot.volume,
                 .playback_speed = snapshot.playback_speed,
                 .has_media = if (snapshot.has_media) 1 else 0,
+                .video_backend_status = toGuiBackendStatus(snapshot.video_backend_status),
             };
 
             gui.ui_new_frame();
@@ -259,4 +283,11 @@ test "selectUploadPath prefers nv12 and yuv420p over rgba" {
 test "selectUploadPath falls back to rgba when planes are incomplete" {
     try std.testing.expectEqual(.rgba, selectUploadPath(gui.VIDEO_FRAME_FORMAT_NV12, 1));
     try std.testing.expectEqual(.rgba, selectUploadPath(gui.VIDEO_FRAME_FORMAT_YUV420P, 2));
+}
+
+test "toGuiBackendStatus maps interop statuses" {
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_BACKEND_STATUS_SOFTWARE), toGuiBackendStatus(.software));
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_BACKEND_STATUS_INTEROP_HANDLE), toGuiBackendStatus(.interop_handle));
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_BACKEND_STATUS_TRUE_ZERO_COPY), toGuiBackendStatus(.true_zero_copy));
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_BACKEND_STATUS_FORCE_ZERO_COPY_BLOCKED), toGuiBackendStatus(.force_zero_copy_blocked));
 }

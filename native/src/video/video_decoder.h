@@ -44,5 +44,6 @@ int video_decoder_decode_frame(VideoDecoder* dec, struct Demuxer* demuxer);
 int video_decoder_get_image(VideoDecoder* dec, uint8_t** data, int* linesize);
 int video_decoder_get_planes(VideoDecoder* dec, uint8_t** planes, int* linesizes, int* plane_count);
 int video_decoder_get_format(VideoDecoder* dec);
+int video_decoder_is_hw_enabled(VideoDecoder* dec);
 
 #endif

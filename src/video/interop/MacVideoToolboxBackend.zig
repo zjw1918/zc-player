@@ -7,6 +7,15 @@ const c = @cImport({
     @cInclude("renderer/renderer.h");
 });
 
+fn probeTrueZeroCopySupportForValue(flag_value: ?[]const u8, has_vt: bool, is_macos: bool) bool {
+    if (!is_macos or !has_vt) {
+        return false;
+    }
+
+    const value = flag_value orelse return false;
+    return value.len > 0 and value[0] != '0';
+}
+
 pub const Capabilities = struct {
     interop_handle: bool,
     true_zero_copy: bool,
@@ -44,14 +53,21 @@ pub const MacVideoToolboxBackend = struct {
     }
 
     pub fn capabilities(_: *const MacVideoToolboxBackend) Capabilities {
-        if (builtin.os.tag != .macos) {
+        const is_macos = builtin.os.tag == .macos;
+        if (!is_macos) {
             return .{ .interop_handle = false, .true_zero_copy = false, .supports_nv12 = false, .supports_yuv420p = false };
         }
 
         const has_vt = c.av_hwdevice_find_type_by_name("videotoolbox") != c.AV_HWDEVICE_TYPE_NONE;
+        const probe_flag = std.posix.getenv("ZC_EXPERIMENTAL_TRUE_ZERO_COPY");
+        const probe_enabled = probeTrueZeroCopySupportForValue(
+            if (probe_flag) |value| std.mem.sliceTo(value, 0) else null,
+            has_vt,
+            is_macos,
+        );
         return .{
             .interop_handle = has_vt,
-            .true_zero_copy = false,
+            .true_zero_copy = probe_enabled,
             .supports_nv12 = has_vt,
             .supports_yuv420p = has_vt,
         };
@@ -120,4 +136,15 @@ test "mac backend returns interop handle after submit" {
     try backend.submitDecodedFrame(frame);
     const handle = try backend.acquireRenderableFrame();
     try std.testing.expect(handle != null);
+}
+
+test "true zero-copy probe requires explicit opt-in flag" {
+    try std.testing.expect(!probeTrueZeroCopySupportForValue(null, true, true));
+    try std.testing.expect(!probeTrueZeroCopySupportForValue("0", true, true));
+    try std.testing.expect(probeTrueZeroCopySupportForValue("1", true, true));
+}
+
+test "true zero-copy probe still requires platform capability" {
+    try std.testing.expect(!probeTrueZeroCopySupportForValue("1", false, true));
+    try std.testing.expect(!probeTrueZeroCopySupportForValue("1", true, false));
 }

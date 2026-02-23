@@ -42,6 +42,7 @@ typedef struct {
     int pending_format;
     int pending_source_hw;
     uint64_t pending_gpu_token;
+    uint64_t delivered_gpu_token;
     double pending_pts;
 
     int true_zero_copy_active;

@@ -2,6 +2,8 @@ const std = @import("std");
 const c = @cImport({
     @cInclude("stdlib.h");
     @cInclude("string.h");
+    @cInclude("libavutil/buffer.h");
+    @cInclude("libavutil/frame.h");
     @cInclude("video/video_pipeline.h");
 });
 
@@ -53,6 +55,35 @@ fn planeGeometry(format: c_int, width: c_int, height: c_int, plane_idx: c_int) ?
 
 fn decodeShouldSkipPlaneExtraction(true_zero_copy_active: c_int, source_hw: c_int, gpu_token: u64) bool {
     return true_zero_copy_active != 0 and source_hw != 0 and gpu_token != 0;
+}
+
+fn releaseGpuToken(token: *u64) void {
+    if (token.* == 0) {
+        return;
+    }
+
+    var frame: ?*c.AVFrame = @ptrFromInt(token.*);
+    c.av_frame_free(&frame);
+    token.* = 0;
+}
+
+fn retainGpuToken(token: u64) u64 {
+    if (token == 0) {
+        return 0;
+    }
+
+    const source: *c.AVFrame = @ptrFromInt(token);
+    var retained = c.av_frame_alloc();
+    if (retained == null) {
+        return 0;
+    }
+
+    if (c.av_frame_ref(retained.?, source) != 0) {
+        c.av_frame_free(&retained);
+        return 0;
+    }
+
+    return @intFromPtr(retained.?);
 }
 
 fn queuePushLocked(
@@ -110,9 +141,16 @@ fn queuePushLocked(
         }
     }
 
+    const retain_token = source_hw != 0 and gpu_token != 0;
+    const retained_gpu_token = if (retain_token) retainGpuToken(gpu_token) else 0;
+    if (retain_token and retained_gpu_token == 0) {
+        return -1;
+    }
+
     frame.format = format;
     frame.source_hw = source_hw;
-    frame.gpu_token = gpu_token;
+    releaseGpuToken(&frame.gpu_token);
+    frame.gpu_token = retained_gpu_token;
     frame.plane_count = if (gpu_only_frame) 0 else expected_plane_count;
     frame.pts = pts;
     pipeline.tail = @mod(pipeline.tail + 1, frameCapacity());
@@ -145,6 +183,8 @@ fn queuePopToUploadLocked(pipeline: *c.VideoPipeline) c_int {
         frame.planes[@intCast(plane_idx)] = old_upload;
     }
 
+    releaseGpuToken(&pipeline.pending_gpu_token);
+
     pipeline.pending_width = frame.width;
     pipeline.pending_height = frame.height;
     pipeline.pending_linesizes[0] = frame.linesizes[0];
@@ -154,6 +194,7 @@ fn queuePopToUploadLocked(pipeline: *c.VideoPipeline) c_int {
     pipeline.pending_format = frame.format;
     pipeline.pending_source_hw = frame.source_hw;
     pipeline.pending_gpu_token = frame.gpu_token;
+    frame.gpu_token = 0;
     pipeline.pending_pts = frame.pts;
     pipeline.have_pending_upload = 1;
 
@@ -178,6 +219,7 @@ fn dropLateQueuedFramesLocked(pipeline: *c.VideoPipeline, render_clock: f64, tol
             break;
         }
 
+        releaseGpuToken(&frame.gpu_token);
         pipeline.head = @mod(pipeline.head + 1, frameCapacity());
         pipeline.count -= 1;
         dropped += 1;
@@ -413,6 +455,14 @@ pub export fn video_pipeline_reset(pipeline: ?*c.VideoPipeline) void {
     const p = pipeline.?;
 
     _ = c.SDL_LockMutex(p.queue_mutex);
+
+    var i: c_int = 0;
+    while (i < frameCapacity()) : (i += 1) {
+        releaseGpuToken(&p.frames[@intCast(i)].gpu_token);
+    }
+    releaseGpuToken(&p.pending_gpu_token);
+    releaseGpuToken(&p.delivered_gpu_token);
+
     p.head = 0;
     p.tail = 0;
     p.count = 0;
@@ -426,6 +476,7 @@ pub export fn video_pipeline_reset(pipeline: ?*c.VideoPipeline) void {
     p.pending_format = c.VIDEO_FRAME_FORMAT_RGBA;
     p.pending_source_hw = 0;
     p.pending_gpu_token = 0;
+    p.delivered_gpu_token = 0;
     p.true_zero_copy_active = 0;
     p.pending_pts = 0.0;
     p.clock_base_pts = -1.0;
@@ -464,6 +515,9 @@ pub export fn video_pipeline_destroy(pipeline: ?*c.VideoPipeline) void {
 
     video_pipeline_stop(p);
 
+    releaseGpuToken(&p.pending_gpu_token);
+    releaseGpuToken(&p.delivered_gpu_token);
+
     var plane_idx: c_int = 0;
     while (plane_idx < 3) : (plane_idx += 1) {
         if (p.upload_planes[@intCast(plane_idx)] != null) {
@@ -483,6 +537,7 @@ pub export fn video_pipeline_destroy(pipeline: ?*c.VideoPipeline) void {
                 p.frames[idx].planes[@intCast(plane_idx)] = null;
             }
         }
+        releaseGpuToken(&p.frames[idx].gpu_token);
     }
 
     if (p.can_push != null) {
@@ -502,6 +557,7 @@ pub export fn video_pipeline_destroy(pipeline: ?*c.VideoPipeline) void {
     p.have_pending_upload = 0;
     p.pending_source_hw = 0;
     p.pending_gpu_token = 0;
+    p.delivered_gpu_token = 0;
     p.true_zero_copy_active = 0;
     p.clock_base_pts = -1.0;
     p.clock_base_time_ns = 0;
@@ -527,6 +583,8 @@ pub export fn video_pipeline_get_frame_for_render(
     }
 
     const p = pipeline.?;
+
+    releaseGpuToken(&p.delivered_gpu_token);
 
     if (p.have_pending_upload == 0) {
         if (p.queue_mutex != null) {
@@ -564,6 +622,8 @@ pub export fn video_pipeline_get_frame_for_render(
         format.* = p.pending_format;
         source_hw.* = p.pending_source_hw;
         gpu_token.* = p.pending_gpu_token;
+        p.delivered_gpu_token = p.pending_gpu_token;
+        p.pending_gpu_token = 0;
         p.have_pending_upload = 0;
         return 1;
     }
@@ -670,6 +730,8 @@ test "queuePushLocked accepts gpu-token frame with zero host planes" {
     var pipeline: c.VideoPipeline = std.mem.zeroes(c.VideoPipeline);
     var src_planes: [3][*c]u8 = .{ null, null, null };
     var src_linesizes: [3]c_int = .{ 0, 0, 0 };
+    var source_frame = try allocTestGpuFrame(1920, 1080);
+    defer c.av_frame_free(&source_frame);
 
     pipeline.frames[0].width = 1920;
     pipeline.frames[0].height = 1080;
@@ -685,13 +747,13 @@ test "queuePushLocked accepts gpu-token frame with zero host planes" {
             1080,
             c.VIDEO_FRAME_FORMAT_NV12,
             1,
-            0xabc,
+            @intFromPtr(source_frame.?),
             3.0,
         ),
     );
     try std.testing.expectEqual(@as(c_int, 0), pipeline.frames[0].plane_count);
     try std.testing.expectEqual(@as(c_int, 1), pipeline.frames[0].source_hw);
-    try std.testing.expectEqual(@as(u64, 0xabc), pipeline.frames[0].gpu_token);
+    try std.testing.expect(pipeline.frames[0].gpu_token != @intFromPtr(source_frame.?));
 }
 
 test "decodeShouldSkipPlaneExtraction requires runtime true-path activation" {
@@ -699,4 +761,106 @@ test "decodeShouldSkipPlaneExtraction requires runtime true-path activation" {
     try std.testing.expect(!decodeShouldSkipPlaneExtraction(1, 0, 0x1));
     try std.testing.expect(!decodeShouldSkipPlaneExtraction(1, 1, 0));
     try std.testing.expect(!decodeShouldSkipPlaneExtraction(0, 1, 0x1));
+}
+
+fn allocTestGpuFrame(width: c_int, height: c_int) !?*c.AVFrame {
+    var frame = c.av_frame_alloc() orelse return error.OutOfMemory;
+    errdefer c.av_frame_free(&frame);
+
+    frame.?.*.format = c.AV_PIX_FMT_NV12;
+    frame.?.*.width = width;
+    frame.?.*.height = height;
+    if (c.av_frame_get_buffer(frame, 32) != 0) {
+        return error.OutOfMemory;
+    }
+
+    return frame;
+}
+
+fn firstPlaneRefCount(frame: *c.AVFrame) c_int {
+    if (frame.*.buf[0] == null) {
+        return 0;
+    }
+    return c.av_buffer_get_ref_count(frame.*.buf[0]);
+}
+
+test "queuePushLocked retains independent gpu token reference" {
+    var pipeline: c.VideoPipeline = std.mem.zeroes(c.VideoPipeline);
+    var src_planes: [3][*c]u8 = .{ null, null, null };
+    var src_linesizes: [3]c_int = .{ 0, 0, 0 };
+    var source_frame = try allocTestGpuFrame(64, 64);
+    defer c.av_frame_free(&source_frame);
+
+    pipeline.frames[0].width = 64;
+    pipeline.frames[0].height = 64;
+
+    try std.testing.expectEqual(@as(c_int, 1), firstPlaneRefCount(source_frame.?));
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        queuePushLocked(
+            &pipeline,
+            &src_planes,
+            &src_linesizes,
+            0,
+            64,
+            64,
+            c.VIDEO_FRAME_FORMAT_NV12,
+            1,
+            @intFromPtr(source_frame.?),
+            0.5,
+        ),
+    );
+    try std.testing.expect(pipeline.frames[0].gpu_token != @intFromPtr(source_frame.?));
+    try std.testing.expectEqual(@as(c_int, 2), firstPlaneRefCount(source_frame.?));
+}
+
+test "dropLateQueuedFramesLocked releases dropped gpu token references" {
+    var pipeline: c.VideoPipeline = std.mem.zeroes(c.VideoPipeline);
+    var src_planes: [3][*c]u8 = .{ null, null, null };
+    var src_linesizes: [3]c_int = .{ 0, 0, 0 };
+    var frame_a = try allocTestGpuFrame(64, 64);
+    defer c.av_frame_free(&frame_a);
+    var frame_b = try allocTestGpuFrame(64, 64);
+    defer c.av_frame_free(&frame_b);
+
+    pipeline.frames[0].width = 64;
+    pipeline.frames[0].height = 64;
+    pipeline.frames[1].width = 64;
+    pipeline.frames[1].height = 64;
+
+    try std.testing.expectEqual(@as(c_int, 0), queuePushLocked(&pipeline, &src_planes, &src_linesizes, 0, 64, 64, c.VIDEO_FRAME_FORMAT_NV12, 1, @intFromPtr(frame_a.?), 1.0));
+    try std.testing.expectEqual(@as(c_int, 0), queuePushLocked(&pipeline, &src_planes, &src_linesizes, 0, 64, 64, c.VIDEO_FRAME_FORMAT_NV12, 1, @intFromPtr(frame_b.?), 1.2));
+    try std.testing.expectEqual(@as(c_int, 2), firstPlaneRefCount(frame_a.?));
+    try std.testing.expectEqual(@as(c_int, 2), firstPlaneRefCount(frame_b.?));
+
+    const dropped = dropLateQueuedFramesLocked(&pipeline, 1.15, 0.01);
+    try std.testing.expectEqual(@as(c_int, 1), dropped);
+    try std.testing.expectEqual(@as(c_int, 1), firstPlaneRefCount(frame_a.?));
+    try std.testing.expectEqual(@as(c_int, 2), firstPlaneRefCount(frame_b.?));
+}
+
+test "queuePopToUploadLocked releases prior pending gpu token before replacement" {
+    var pipeline: c.VideoPipeline = std.mem.zeroes(c.VideoPipeline);
+    var src_planes: [3][*c]u8 = .{ null, null, null };
+    var src_linesizes: [3]c_int = .{ 0, 0, 0 };
+    var frame_a = try allocTestGpuFrame(64, 64);
+    defer c.av_frame_free(&frame_a);
+    var frame_b = try allocTestGpuFrame(64, 64);
+    defer c.av_frame_free(&frame_b);
+
+    pipeline.frames[0].width = 64;
+    pipeline.frames[0].height = 64;
+    pipeline.frames[1].width = 64;
+    pipeline.frames[1].height = 64;
+
+    try std.testing.expectEqual(@as(c_int, 0), queuePushLocked(&pipeline, &src_planes, &src_linesizes, 0, 64, 64, c.VIDEO_FRAME_FORMAT_NV12, 1, @intFromPtr(frame_a.?), 1.0));
+    try std.testing.expectEqual(@as(c_int, 0), queuePushLocked(&pipeline, &src_planes, &src_linesizes, 0, 64, 64, c.VIDEO_FRAME_FORMAT_NV12, 1, @intFromPtr(frame_b.?), 1.2));
+
+    try std.testing.expectEqual(@as(c_int, 0), queuePopToUploadLocked(&pipeline));
+    try std.testing.expectEqual(@as(c_int, 2), firstPlaneRefCount(frame_a.?));
+
+    pipeline.have_pending_upload = 0;
+    try std.testing.expectEqual(@as(c_int, 0), queuePopToUploadLocked(&pipeline));
+    try std.testing.expectEqual(@as(c_int, 1), firstPlaneRefCount(frame_a.?));
+    try std.testing.expectEqual(@as(c_int, 2), firstPlaneRefCount(frame_b.?));
 }

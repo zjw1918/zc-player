@@ -1,4 +1,5 @@
 #include "renderer.h"
+#include "video/video_decoder.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1297,7 +1298,7 @@ int renderer_submit_interop_handle(Renderer* ren, uint64_t handle_token, int wid
         return -1;
     }
 
-    if (format == VIDEO_FORMAT_NV12 && frame->plane_count >= 2 && frame->planes[1] != NULL) {
+    if (format == VIDEO_FRAME_FORMAT_NV12 && frame->plane_count >= 2 && frame->planes[1] != NULL) {
         return renderer_upload_video_nv12(
             ren,
             frame->planes[0],
@@ -1309,7 +1310,7 @@ int renderer_submit_interop_handle(Renderer* ren, uint64_t handle_token, int wid
         );
     }
 
-    if (format == VIDEO_FORMAT_YUV420P && frame->plane_count >= 3 && frame->planes[1] != NULL && frame->planes[2] != NULL) {
+    if (format == VIDEO_FRAME_FORMAT_YUV420P && frame->plane_count >= 3 && frame->planes[1] != NULL && frame->planes[2] != NULL) {
         return renderer_upload_video_yuv420p(
             ren,
             frame->planes[0],

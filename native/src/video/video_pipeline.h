@@ -44,6 +44,8 @@ typedef struct {
     uint64_t pending_gpu_token;
     double pending_pts;
 
+    int true_zero_copy_active;
+
     double clock_base_pts;
     Uint64 clock_base_time_ns;
     double expected_start_pts;
@@ -68,5 +70,7 @@ int video_pipeline_get_frame_for_render(
     int* source_hw,
     uint64_t* gpu_token
 );
+
+void video_pipeline_set_true_zero_copy_active(VideoPipeline* pipeline, int active);
 
 #endif

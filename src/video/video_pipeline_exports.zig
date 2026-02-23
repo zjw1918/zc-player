@@ -51,44 +51,8 @@ fn planeGeometry(format: c_int, width: c_int, height: c_int, plane_idx: c_int) ?
     };
 }
 
-fn envFlagEnabled(value: ?[]const u8) bool {
-    const text = value orelse return false;
-    return text.len > 0 and text[0] != '0';
-}
-
-fn backendModeAllowsZeroCopy(mode: ?[]const u8) bool {
-    const text = mode orelse return true;
-    return !std.ascii.eqlIgnoreCase(text, "software");
-}
-
-fn truePathCandidateMode(
-    source_hw: c_int,
-    gpu_token: u64,
-    backend_mode: ?[]const u8,
-    true_zero_copy_flag: ?[]const u8,
-    forced_interop_flag: ?[]const u8,
-) bool {
-    if (source_hw == 0 or gpu_token == 0) {
-        return false;
-    }
-
-    if (!backendModeAllowsZeroCopy(backend_mode)) {
-        return false;
-    }
-
-    if (!envFlagEnabled(true_zero_copy_flag)) {
-        return false;
-    }
-
-    return !envFlagEnabled(forced_interop_flag);
-}
-
-fn decodeShouldSkipPlaneExtraction(source_hw: c_int, gpu_token: u64) bool {
-    const backend_mode = if (std.posix.getenv("ZC_VIDEO_BACKEND_MODE")) |value| std.mem.sliceTo(value, 0) else null;
-    const true_zero_copy_flag = if (std.posix.getenv("ZC_EXPERIMENTAL_TRUE_ZERO_COPY")) |value| std.mem.sliceTo(value, 0) else null;
-    const forced_interop_flag = if (std.posix.getenv("ZC_FORCE_INTEROP_HANDLE")) |value| std.mem.sliceTo(value, 0) else null;
-
-    return truePathCandidateMode(source_hw, gpu_token, backend_mode, true_zero_copy_flag, forced_interop_flag);
+fn decodeShouldSkipPlaneExtraction(true_zero_copy_active: c_int, source_hw: c_int, gpu_token: u64) bool {
+    return true_zero_copy_active != 0 and source_hw != 0 and gpu_token != 0;
 }
 
 fn queuePushLocked(
@@ -257,6 +221,7 @@ fn decodeThreadMain(userdata: ?*anyopaque) callconv(.c) c_int {
             _ = c.SDL_WaitCondition(pipeline.can_push, pipeline.queue_mutex);
         }
         var running = pipeline.decode_running;
+        const true_zero_copy_active = pipeline.true_zero_copy_active;
         _ = c.SDL_UnlockMutex(pipeline.queue_mutex);
 
         if (running == 0) {
@@ -279,7 +244,7 @@ fn decodeThreadMain(userdata: ?*anyopaque) callconv(.c) c_int {
         var planes: [3][*c]u8 = .{ null, null, null };
         var linesizes: [3]c_int = .{ 0, 0, 0 };
         var plane_count: c_int = 0;
-        const gpu_only_frame = decodeShouldSkipPlaneExtraction(source_hw, gpu_token);
+        const gpu_only_frame = decodeShouldSkipPlaneExtraction(true_zero_copy_active, source_hw, gpu_token);
 
         if (!gpu_only_frame) {
             const expected_plane_count = planeCountForFormat(format);
@@ -461,6 +426,7 @@ pub export fn video_pipeline_reset(pipeline: ?*c.VideoPipeline) void {
     p.pending_format = c.VIDEO_FRAME_FORMAT_RGBA;
     p.pending_source_hw = 0;
     p.pending_gpu_token = 0;
+    p.true_zero_copy_active = 0;
     p.pending_pts = 0.0;
     p.clock_base_pts = -1.0;
     p.clock_base_time_ns = 0;
@@ -471,6 +437,22 @@ pub export fn video_pipeline_reset(pipeline: ?*c.VideoPipeline) void {
         _ = c.SDL_BroadcastCondition(p.can_push);
     }
     _ = c.SDL_UnlockMutex(p.queue_mutex);
+}
+
+pub export fn video_pipeline_set_true_zero_copy_active(pipeline: ?*c.VideoPipeline, active: c_int) void {
+    if (pipeline == null) {
+        return;
+    }
+
+    const p = pipeline.?;
+    if (p.queue_mutex != null) {
+        _ = c.SDL_LockMutex(p.queue_mutex);
+        p.true_zero_copy_active = if (active != 0) 1 else 0;
+        _ = c.SDL_UnlockMutex(p.queue_mutex);
+        return;
+    }
+
+    p.true_zero_copy_active = if (active != 0) 1 else 0;
 }
 
 pub export fn video_pipeline_destroy(pipeline: ?*c.VideoPipeline) void {
@@ -520,6 +502,7 @@ pub export fn video_pipeline_destroy(pipeline: ?*c.VideoPipeline) void {
     p.have_pending_upload = 0;
     p.pending_source_hw = 0;
     p.pending_gpu_token = 0;
+    p.true_zero_copy_active = 0;
     p.clock_base_pts = -1.0;
     p.clock_base_time_ns = 0;
     p.expected_start_pts = 0.0;
@@ -711,12 +694,9 @@ test "queuePushLocked accepts gpu-token frame with zero host planes" {
     try std.testing.expectEqual(@as(u64, 0xabc), pipeline.frames[0].gpu_token);
 }
 
-test "truePathCandidateMode requires zero-copy gates and gpu token" {
-    try std.testing.expect(truePathCandidateMode(1, 0x1, "zero_copy", "1", null));
-    try std.testing.expect(truePathCandidateMode(1, 0x1, null, "1", null));
-    try std.testing.expect(!truePathCandidateMode(1, 0x1, "software", "1", null));
-    try std.testing.expect(!truePathCandidateMode(1, 0x1, "zero_copy", "0", null));
-    try std.testing.expect(!truePathCandidateMode(1, 0x1, "zero_copy", "1", "1"));
-    try std.testing.expect(!truePathCandidateMode(1, 0, "zero_copy", "1", null));
-    try std.testing.expect(!truePathCandidateMode(0, 0x1, "zero_copy", "1", null));
+test "decodeShouldSkipPlaneExtraction requires runtime true-path activation" {
+    try std.testing.expect(decodeShouldSkipPlaneExtraction(1, 1, 0x1));
+    try std.testing.expect(!decodeShouldSkipPlaneExtraction(1, 0, 0x1));
+    try std.testing.expect(!decodeShouldSkipPlaneExtraction(1, 1, 0));
+    try std.testing.expect(!decodeShouldSkipPlaneExtraction(0, 1, 0x1));
 }

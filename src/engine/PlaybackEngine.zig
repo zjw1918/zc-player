@@ -24,6 +24,7 @@ pub const PlaybackEngine = struct {
     snapshot_mutex: std.Thread.Mutex = .{},
     snapshot: Snapshot = .{},
     session_mutex: std.Thread.Mutex = .{},
+    true_zero_copy_active_requested: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
 
     session: PlaybackSession,
 
@@ -111,6 +112,7 @@ pub const PlaybackEngine = struct {
             return null;
         }
         defer self.session_mutex.unlock();
+        self.syncTrueZeroCopyActiveLocked();
         return self.session.getFrameForRender(master_clock);
     }
 
@@ -119,7 +121,22 @@ pub const PlaybackEngine = struct {
             return;
         }
         defer self.session_mutex.unlock();
+        self.syncTrueZeroCopyActiveLocked();
         self.session.reportTrueZeroCopySubmitResult(success);
+    }
+
+    pub fn setTrueZeroCopyActive(self: *Self, active: bool) void {
+        self.true_zero_copy_active_requested.store(if (active) 1 else 0, .release);
+        if (!self.session_mutex.tryLock()) {
+            return;
+        }
+        defer self.session_mutex.unlock();
+        self.syncTrueZeroCopyActiveLocked();
+    }
+
+    fn syncTrueZeroCopyActiveLocked(self: *Self) void {
+        const active = self.true_zero_copy_active_requested.load(.acquire) != 0;
+        self.session.setTrueZeroCopyActive(active);
     }
 
     fn resetSnapshot(self: *Self) void {

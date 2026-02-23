@@ -65,6 +65,13 @@ pub const VideoPipeline = struct {
         }
     }
 
+    pub fn setTrueZeroCopyActive(self: *VideoPipeline, active: bool) void {
+        if (!self.initialized) {
+            return;
+        }
+        c.video_pipeline_set_true_zero_copy_active(&self.handle, if (active) 1 else 0);
+    }
+
     pub fn init(self: *VideoPipeline, player: *Player) !void {
         if (c.video_pipeline_init(&self.handle, player.raw()) != 0) {
             return error.InitFailed;

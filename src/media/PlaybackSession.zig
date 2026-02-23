@@ -146,6 +146,10 @@ pub const PlaybackSession = struct {
         self.video_pipeline.reportTrueZeroCopySubmitResult(success);
     }
 
+    pub fn setTrueZeroCopyActive(self: *PlaybackSession, active: bool) void {
+        self.video_pipeline.setTrueZeroCopyActive(active);
+    }
+
     fn destroyOutputs(self: *PlaybackSession) void {
         self.player.stopDemuxer();
         self.video_pipeline.destroy();

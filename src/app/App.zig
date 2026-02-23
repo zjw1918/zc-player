@@ -245,6 +245,7 @@ pub const App = struct {
             }
 
             const snapshot = self.engine.getSnapshot();
+            self.engine.setTrueZeroCopyActive(false);
 
             if (snapshot.state == .playing) {
                 if (self.engine.getFrameForRender(snapshot.current_time)) |frame| {
@@ -291,6 +292,7 @@ pub const App = struct {
                             const gpu_payload = isGpuInteropPayload(interop.token);
                             var submit_result: c_int = -1;
                             const path = selectInteropSubmitPath(snapshot.video_backend_status);
+                            self.engine.setTrueZeroCopyActive(path == .true_zero_copy);
                             switch (path) {
                                 .true_zero_copy => {
                                     submit_result = gui.renderer_submit_true_zero_copy_handle(

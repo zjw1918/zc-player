@@ -20,6 +20,18 @@ pub const VideoPipeline = struct {
         format: FrameFormat,
     };
 
+    pub const InteropFrame = struct {
+        token: u64,
+        width: c_int,
+        height: c_int,
+        format: FrameFormat,
+    };
+
+    pub const RenderFrame = union(enum) {
+        software: VideoFrame,
+        interop: InteropFrame,
+    };
+
     fn frameFormatFromTag(format: c_int) FrameFormat {
         return switch (format) {
             c.VIDEO_FRAME_FORMAT_NV12 => .nv12,
@@ -68,7 +80,7 @@ pub const VideoPipeline = struct {
         c.video_pipeline_reset(&self.handle);
     }
 
-    pub fn getFrameForRender(self: *VideoPipeline, master_clock: f64) ?VideoFrame {
+    pub fn getFrameForRender(self: *VideoPipeline, master_clock: f64) ?RenderFrame {
         if (!self.initialized) {
             return null;
         }
@@ -110,30 +122,33 @@ pub const VideoPipeline = struct {
             if (interop.acquireRenderableFrame()) |frame| {
                 switch (frame) {
                     .software_planes => |sw| {
-                        return VideoFrame{
+                        return .{ .software = .{
                             .planes = sw.planes,
                             .linesizes = sw.linesizes,
                             .plane_count = sw.plane_count,
                             .width = sw.width,
                             .height = sw.height,
                             .format = frameFormatFromTag(sw.format),
-                        };
+                        } };
                     },
-                    .interop_handle => {
-                        return null;
-                    },
+                    .interop_handle => |handle| return .{ .interop = .{
+                        .token = handle.token,
+                        .width = width,
+                        .height = height,
+                        .format = frameFormatFromTag(format),
+                    } },
                 }
             }
         }
 
-        return VideoFrame{
+        return .{ .software = .{
             .planes = planes,
             .linesizes = linesizes,
             .plane_count = plane_count,
             .width = width,
             .height = height,
             .format = frameFormatFromTag(format),
-        };
+        } };
     }
 };
 

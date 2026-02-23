@@ -3,7 +3,7 @@ const Snapshot = @import("../engine/Snapshot.zig").Snapshot;
 const Player = @import("Player.zig").Player;
 const AudioOutput = @import("../audio/AudioOutput.zig").AudioOutput;
 const VideoPipeline = @import("../video/VideoPipeline.zig").VideoPipeline;
-const VideoFrame = VideoPipeline.VideoFrame;
+const RenderFrame = VideoPipeline.RenderFrame;
 
 pub const PlaybackSession = struct {
     allocator: std.mem.Allocator,
@@ -119,7 +119,7 @@ pub const PlaybackSession = struct {
         };
     }
 
-    pub fn getFrameForRender(self: *PlaybackSession, master_clock: f64) ?VideoFrame {
+    pub fn getFrameForRender(self: *PlaybackSession, master_clock: f64) ?RenderFrame {
         return self.video_pipeline.getFrameForRender(master_clock);
     }
 

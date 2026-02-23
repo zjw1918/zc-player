@@ -3,7 +3,7 @@ const CommandMod = @import("Command.zig");
 const Command = CommandMod.Command;
 const Snapshot = @import("Snapshot.zig").Snapshot;
 const PlaybackSession = @import("../media/PlaybackSession.zig").PlaybackSession;
-const VideoFrame = @import("../video/VideoPipeline.zig").VideoPipeline.VideoFrame;
+const RenderFrame = @import("../video/VideoPipeline.zig").VideoPipeline.RenderFrame;
 
 pub const PlaybackEngine = struct {
     const Self = @This();
@@ -106,7 +106,7 @@ pub const PlaybackEngine = struct {
         return self.snapshot;
     }
 
-    pub fn getFrameForRender(self: *Self, master_clock: f64) ?VideoFrame {
+    pub fn getFrameForRender(self: *Self, master_clock: f64) ?RenderFrame {
         if (!self.session_mutex.tryLock()) {
             return null;
         }

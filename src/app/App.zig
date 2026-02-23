@@ -179,39 +179,52 @@ pub const App = struct {
 
             if (snapshot.state == .playing) {
                 if (self.engine.getFrameForRender(snapshot.current_time)) |frame| {
-                    const path = selectUploadPath(@intFromEnum(frame.format), frame.plane_count);
-                    switch (path) {
-                        .nv12 => {
-                            _ = gui.renderer_upload_video_nv12(
-                                &renderer,
-                                frame.planes[0],
-                                frame.linesizes[0],
-                                frame.planes[1],
-                                frame.linesizes[1],
-                                frame.width,
-                                frame.height,
-                            );
+                    switch (frame) {
+                        .software => |sw| {
+                            const path = selectUploadPath(@intFromEnum(sw.format), sw.plane_count);
+                            switch (path) {
+                                .nv12 => {
+                                    _ = gui.renderer_upload_video_nv12(
+                                        &renderer,
+                                        sw.planes[0],
+                                        sw.linesizes[0],
+                                        sw.planes[1],
+                                        sw.linesizes[1],
+                                        sw.width,
+                                        sw.height,
+                                    );
+                                },
+                                .yuv420p => {
+                                    _ = gui.renderer_upload_video_yuv420p(
+                                        &renderer,
+                                        sw.planes[0],
+                                        sw.linesizes[0],
+                                        sw.planes[1],
+                                        sw.linesizes[1],
+                                        sw.planes[2],
+                                        sw.linesizes[2],
+                                        sw.width,
+                                        sw.height,
+                                    );
+                                },
+                                .rgba => {
+                                    _ = gui.renderer_upload_video(
+                                        &renderer,
+                                        sw.planes[0],
+                                        sw.width,
+                                        sw.height,
+                                        sw.linesizes[0],
+                                    );
+                                },
+                            }
                         },
-                        .yuv420p => {
-                            _ = gui.renderer_upload_video_yuv420p(
+                        .interop => |interop| {
+                            _ = gui.renderer_submit_interop_handle(
                                 &renderer,
-                                frame.planes[0],
-                                frame.linesizes[0],
-                                frame.planes[1],
-                                frame.linesizes[1],
-                                frame.planes[2],
-                                frame.linesizes[2],
-                                frame.width,
-                                frame.height,
-                            );
-                        },
-                        .rgba => {
-                            _ = gui.renderer_upload_video(
-                                &renderer,
-                                frame.planes[0],
-                                frame.width,
-                                frame.height,
-                                frame.linesizes[0],
+                                interop.token,
+                                interop.width,
+                                interop.height,
+                                @intFromEnum(interop.format),
                             );
                         },
                     }

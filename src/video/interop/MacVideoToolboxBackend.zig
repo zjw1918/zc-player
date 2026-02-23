@@ -16,6 +16,12 @@ fn probeTrueZeroCopySupportForValue(flag_value: ?[]const u8, has_vt: bool, is_ma
     return value.len > 0 and value[0] != '0';
 }
 
+fn trueZeroCopyActiveForStreak(capable: bool, hw_frame_streak: u32, threshold: u32) bool {
+    return capable and hw_frame_streak >= threshold;
+}
+
+const true_zero_copy_hw_streak_threshold: u32 = 12;
+
 pub const Capabilities = struct {
     interop_handle: bool,
     true_zero_copy: bool,
@@ -39,17 +45,23 @@ pub const MacVideoToolboxBackend = struct {
     initialized: bool = false,
     host_frame: c.RendererInteropHostFrame = std.mem.zeroes(c.RendererInteropHostFrame),
     has_frame: bool = false,
+    hw_frame_streak: u32 = 0,
+    true_zero_copy_capable: bool = false,
 
     pub fn init(self: *MacVideoToolboxBackend) void {
         self.initialized = true;
         self.host_frame = std.mem.zeroes(c.RendererInteropHostFrame);
         self.has_frame = false;
+        self.hw_frame_streak = 0;
+        self.true_zero_copy_capable = self.capabilities().true_zero_copy;
     }
 
     pub fn deinit(self: *MacVideoToolboxBackend) void {
         self.initialized = false;
         self.host_frame = std.mem.zeroes(c.RendererInteropHostFrame);
         self.has_frame = false;
+        self.hw_frame_streak = 0;
+        self.true_zero_copy_capable = false;
     }
 
     pub fn capabilities(_: *const MacVideoToolboxBackend) Capabilities {
@@ -89,7 +101,16 @@ pub const MacVideoToolboxBackend = struct {
         self.host_frame.height = frame.height;
         self.host_frame.format = frame.format;
         self.host_frame.source_is_hw = if (frame.source_hw) 1 else 0;
+        if (frame.source_hw) {
+            self.hw_frame_streak += 1;
+        } else {
+            self.hw_frame_streak = 0;
+        }
         self.has_frame = true;
+    }
+
+    pub fn trueZeroCopyActive(self: *const MacVideoToolboxBackend) bool {
+        return trueZeroCopyActiveForStreak(self.true_zero_copy_capable, self.hw_frame_streak, true_zero_copy_hw_streak_threshold);
     }
 
     pub fn acquireRenderableFrame(self: *MacVideoToolboxBackend) AcquireError!?InteropHandle {
@@ -147,4 +168,10 @@ test "true zero-copy probe requires explicit opt-in flag" {
 test "true zero-copy probe still requires platform capability" {
     try std.testing.expect(!probeTrueZeroCopySupportForValue("1", false, true));
     try std.testing.expect(!probeTrueZeroCopySupportForValue("1", true, false));
+}
+
+test "true zero-copy active requires sustained hardware frames" {
+    try std.testing.expect(!trueZeroCopyActiveForStreak(true, 5, 12));
+    try std.testing.expect(trueZeroCopyActiveForStreak(true, 12, 12));
+    try std.testing.expect(!trueZeroCopyActiveForStreak(false, 20, 12));
 }

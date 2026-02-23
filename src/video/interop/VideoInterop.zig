@@ -144,8 +144,7 @@ pub const VideoInterop = struct {
         }
 
         if (self.kind == .macos_videotoolbox) {
-            const caps = self.mac_backend.capabilities();
-            return if (caps.true_zero_copy) .true_zero_copy else .interop_handle;
+            return if (self.mac_backend.trueZeroCopyActive()) .true_zero_copy else .interop_handle;
         }
 
         return .software;

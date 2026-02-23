@@ -52,6 +52,13 @@ pub const VideoPipeline = struct {
         return .software;
     }
 
+    pub fn interopFallbackReason(self: *const VideoPipeline) VideoInteropMod.FallbackReason {
+        if (self.interop) |*interop| {
+            return interop.fallbackReason();
+        }
+        return .none;
+    }
+
     pub fn init(self: *VideoPipeline, player: *Player) !void {
         if (c.video_pipeline_init(&self.handle, player.raw()) != 0) {
             return error.InitFailed;

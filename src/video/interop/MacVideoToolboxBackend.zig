@@ -135,6 +135,10 @@ pub const MacVideoToolboxBackend = struct {
         return trueZeroCopyActiveForStreak(self.true_zero_copy_capable, self.hw_frame_streak, true_zero_copy_hw_streak_threshold);
     }
 
+    pub fn trueZeroCopyPayloadReady(self: *const MacVideoToolboxBackend) bool {
+        return self.host_frame.payload_kind == c.RENDERER_INTEROP_PAYLOAD_GPU and self.host_frame.gpu_token != 0;
+    }
+
     pub fn acquireRenderableFrame(self: *MacVideoToolboxBackend) AcquireError!?InteropHandle {
         if (!self.initialized) {
             return error.NotSupported;

@@ -3,6 +3,7 @@ const PlaybackEngine = @import("../engine/PlaybackEngine.zig").PlaybackEngine;
 const SnapshotMod = @import("../engine/Snapshot.zig");
 const PlaybackState = SnapshotMod.PlaybackState;
 const VideoBackendStatus = SnapshotMod.VideoBackendStatus;
+const VideoFallbackReason = SnapshotMod.VideoFallbackReason;
 const gui = @import("../ffi/gui.zig").c;
 
 const UploadPath = enum {
@@ -50,6 +51,16 @@ fn toGuiBackendStatus(status: VideoBackendStatus) c_int {
         .interop_handle => gui.VIDEO_BACKEND_STATUS_INTEROP_HANDLE,
         .true_zero_copy => gui.VIDEO_BACKEND_STATUS_TRUE_ZERO_COPY,
         .force_zero_copy_blocked => gui.VIDEO_BACKEND_STATUS_FORCE_ZERO_COPY_BLOCKED,
+    };
+}
+
+fn toGuiFallbackReason(reason: VideoFallbackReason) c_int {
+    return switch (reason) {
+        .none => gui.VIDEO_FALLBACK_REASON_NONE,
+        .unsupported_mode => gui.VIDEO_FALLBACK_REASON_UNSUPPORTED_MODE,
+        .backend_failure => gui.VIDEO_FALLBACK_REASON_BACKEND_FAILURE,
+        .import_failure => gui.VIDEO_FALLBACK_REASON_IMPORT_FAILURE,
+        .format_not_supported => gui.VIDEO_FALLBACK_REASON_FORMAT_NOT_SUPPORTED,
     };
 }
 
@@ -271,6 +282,7 @@ pub const App = struct {
                 .playback_speed = snapshot.playback_speed,
                 .has_media = if (snapshot.has_media) 1 else 0,
                 .video_backend_status = toGuiBackendStatus(snapshot.video_backend_status),
+                .video_fallback_reason = toGuiFallbackReason(snapshot.video_fallback_reason),
             };
 
             gui.ui_new_frame();
@@ -312,6 +324,14 @@ test "toGuiBackendStatus maps interop statuses" {
     try std.testing.expectEqual(@as(c_int, gui.VIDEO_BACKEND_STATUS_INTEROP_HANDLE), toGuiBackendStatus(.interop_handle));
     try std.testing.expectEqual(@as(c_int, gui.VIDEO_BACKEND_STATUS_TRUE_ZERO_COPY), toGuiBackendStatus(.true_zero_copy));
     try std.testing.expectEqual(@as(c_int, gui.VIDEO_BACKEND_STATUS_FORCE_ZERO_COPY_BLOCKED), toGuiBackendStatus(.force_zero_copy_blocked));
+}
+
+test "toGuiFallbackReason maps interop fallback reasons" {
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_FALLBACK_REASON_NONE), toGuiFallbackReason(.none));
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_FALLBACK_REASON_UNSUPPORTED_MODE), toGuiFallbackReason(.unsupported_mode));
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_FALLBACK_REASON_BACKEND_FAILURE), toGuiFallbackReason(.backend_failure));
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_FALLBACK_REASON_IMPORT_FAILURE), toGuiFallbackReason(.import_failure));
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_FALLBACK_REASON_FORMAT_NOT_SUPPORTED), toGuiFallbackReason(.format_not_supported));
 }
 
 test "selectInteropSubmitPath chooses true-zero-copy only for active status" {

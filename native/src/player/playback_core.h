@@ -37,6 +37,14 @@ typedef enum {
     VIDEO_BACKEND_STATUS_FORCE_ZERO_COPY_BLOCKED = 3,
 } VideoBackendStatus;
 
+typedef enum {
+    VIDEO_FALLBACK_REASON_NONE = 0,
+    VIDEO_FALLBACK_REASON_UNSUPPORTED_MODE = 1,
+    VIDEO_FALLBACK_REASON_BACKEND_FAILURE = 2,
+    VIDEO_FALLBACK_REASON_IMPORT_FAILURE = 3,
+    VIDEO_FALLBACK_REASON_FORMAT_NOT_SUPPORTED = 4,
+} VideoFallbackReason;
+
 typedef struct {
     PlayerState state;
     double current_time;
@@ -45,6 +53,7 @@ typedef struct {
     double playback_speed;
     int has_media;
     int video_backend_status;
+    int video_fallback_reason;
 } PlaybackSnapshot;
 
 typedef struct {

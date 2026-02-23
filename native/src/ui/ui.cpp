@@ -86,6 +86,23 @@ static const char* backend_status_label(int status) {
     }
 }
 
+static const char* fallback_reason_label(int reason) {
+    switch (reason) {
+        case VIDEO_FALLBACK_REASON_NONE:
+            return "none";
+        case VIDEO_FALLBACK_REASON_UNSUPPORTED_MODE:
+            return "unsupported-mode";
+        case VIDEO_FALLBACK_REASON_BACKEND_FAILURE:
+            return "backend-failure";
+        case VIDEO_FALLBACK_REASON_IMPORT_FAILURE:
+            return "import-failure";
+        case VIDEO_FALLBACK_REASON_FORMAT_NOT_SUPPORTED:
+            return "format-not-supported";
+        default:
+            return "unknown";
+    }
+}
+
 static void SDLCALL open_file_dialog_callback(void* userdata, const char* const* filelist, int filter) {
     (void)filter;
 
@@ -348,6 +365,8 @@ void ui_render(UIState* ui, const PlaybackSnapshot* snapshot) {
         }
 
         ImGui::Text("Backend: %s", backend_status_label(snapshot->video_backend_status));
+        ImGui::SameLine();
+        ImGui::Text("Fallback: %s", fallback_reason_label(snapshot->video_fallback_reason));
         ImGui::SameLine();
         ImGui::TextUnformatted("  Space Play/Pause  Left/Right Seek  Up/Down Volume");
     }

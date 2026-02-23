@@ -38,6 +38,14 @@ pub const RuntimeStatus = enum {
     force_zero_copy_blocked,
 };
 
+pub const FallbackReason = enum {
+    none,
+    unsupported_mode,
+    backend_failure,
+    import_failure,
+    format_not_supported,
+};
+
 pub fn initErrorReason(err: InitError) []const u8 {
     return switch (err) {
         error.UnsupportedZeroCopy => "force_zero_copy requested, but true zero-copy backend is not available on this platform/runtime",
@@ -56,6 +64,7 @@ pub const VideoInterop = struct {
     submit_failure_count: u64,
     acquire_failure_count: u64,
     force_zero_copy_blocked: bool,
+    last_fallback_reason: FallbackReason,
 
     pub fn init(mode: SelectionMode) InitError!VideoInterop {
         var interop = VideoInterop{
@@ -70,6 +79,7 @@ pub const VideoInterop = struct {
             .submit_failure_count = 0,
             .acquire_failure_count = 0,
             .force_zero_copy_blocked = false,
+            .last_fallback_reason = .none,
         };
         interop.software.init();
         interop.mac_backend.init();
@@ -113,9 +123,10 @@ pub const VideoInterop = struct {
         self.software.deinit();
     }
 
-    fn recordFailure(self: *VideoInterop) void {
+    fn recordFailure(self: *VideoInterop, reason: FallbackReason) void {
         self.submit_failure_count += 1;
         self.consecutive_failures += 1;
+        self.last_fallback_reason = reason;
         if (self.kind == .macos_videotoolbox and self.consecutive_failures >= self.failure_threshold) {
             if (self.mode == .force_zero_copy) {
                 return;
@@ -144,10 +155,17 @@ pub const VideoInterop = struct {
         }
 
         if (self.kind == .macos_videotoolbox) {
-            return if (self.mac_backend.trueZeroCopyActive()) .true_zero_copy else .interop_handle;
+            return if (self.mac_backend.trueZeroCopyActive() and self.mac_backend.trueZeroCopyPayloadReady()) .true_zero_copy else .interop_handle;
         }
 
         return .software;
+    }
+
+    pub fn fallbackReason(self: *const VideoInterop) FallbackReason {
+        if (self.force_zero_copy_blocked) {
+            return .unsupported_mode;
+        }
+        return self.last_fallback_reason;
     }
 
     pub fn capabilities(self: *const VideoInterop) Capabilities {
@@ -176,7 +194,7 @@ pub const VideoInterop = struct {
 
         if (self.kind == .macos_videotoolbox) {
             self.mac_backend.submitDecodedFrame(frame) catch {
-                self.recordFailure();
+                self.recordFailure(.backend_failure);
                 return;
             };
             self.recordSuccess();
@@ -187,7 +205,7 @@ pub const VideoInterop = struct {
         if (self.kind == .macos_videotoolbox) {
             const maybe_handle = self.mac_backend.acquireRenderableFrame() catch {
                 self.acquire_failure_count += 1;
-                self.recordFailure();
+                self.recordFailure(.import_failure);
                 return null;
             };
 
@@ -276,4 +294,55 @@ test "interop diagnostics default to disabled" {
 
 test "unsupported zero-copy error has explicit reason" {
     try std.testing.expect(std.mem.indexOf(u8, initErrorReason(error.UnsupportedZeroCopy), "force_zero_copy") != null);
+}
+
+test "reasoned true-zero-copy fallback uses import failure reason" {
+    if (VideoInterop.init(.force_zero_copy)) |_| {
+        return;
+    } else |_| {}
+
+    var interop = VideoInterop{
+        .kind = .software_upload,
+        .mode = .force_zero_copy,
+        .software = .{},
+        .mac_backend = .{},
+        .fallback_switches = 0,
+        .consecutive_failures = 0,
+        .failure_threshold = 3,
+        .submit_success_count = 0,
+        .submit_failure_count = 0,
+        .acquire_failure_count = 0,
+        .force_zero_copy_blocked = true,
+        .last_fallback_reason = .unsupported_mode,
+    };
+    try std.testing.expectEqual(FallbackReason.unsupported_mode, interop.fallbackReason());
+
+    interop.force_zero_copy_blocked = false;
+    interop.recordFailure(.import_failure);
+    try std.testing.expectEqual(FallbackReason.import_failure, interop.fallbackReason());
+}
+
+test "runtime status requires gpu payload before true-zero-copy" {
+    var interop = VideoInterop{
+        .kind = .macos_videotoolbox,
+        .mode = .auto,
+        .software = .{},
+        .mac_backend = .{},
+        .fallback_switches = 0,
+        .consecutive_failures = 0,
+        .failure_threshold = 3,
+        .submit_success_count = 0,
+        .submit_failure_count = 0,
+        .acquire_failure_count = 0,
+        .force_zero_copy_blocked = false,
+        .last_fallback_reason = .none,
+    };
+
+    interop.mac_backend.true_zero_copy_capable = true;
+    interop.mac_backend.hw_frame_streak = 12;
+    interop.mac_backend.last_frame_format = 2;
+    interop.mac_backend.host_frame.payload_kind = 0;
+    interop.mac_backend.host_frame.gpu_token = 0;
+
+    try std.testing.expectEqual(RuntimeStatus.interop_handle, interop.runtimeStatus());
 }

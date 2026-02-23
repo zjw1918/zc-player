@@ -1,6 +1,7 @@
 const std = @import("std");
 const Snapshot = @import("../engine/Snapshot.zig").Snapshot;
 const VideoBackendStatus = @import("../engine/Snapshot.zig").VideoBackendStatus;
+const VideoFallbackReason = @import("../engine/Snapshot.zig").VideoFallbackReason;
 const Player = @import("Player.zig").Player;
 const AudioOutput = @import("../audio/AudioOutput.zig").AudioOutput;
 const VideoPipeline = @import("../video/VideoPipeline.zig").VideoPipeline;
@@ -117,6 +118,14 @@ pub const PlaybackSession = struct {
             .force_zero_copy_blocked => .force_zero_copy_blocked,
         };
 
+        const fallback_reason: VideoFallbackReason = switch (self.video_pipeline.interopFallbackReason()) {
+            .none => .none,
+            .unsupported_mode => .unsupported_mode,
+            .backend_failure => .backend_failure,
+            .import_failure => .import_failure,
+            .format_not_supported => .format_not_supported,
+        };
+
         return Snapshot{
             .state = self.player.state(),
             .current_time = self.player.currentTime(),
@@ -125,6 +134,7 @@ pub const PlaybackSession = struct {
             .playback_speed = self.player.playbackSpeed(),
             .has_media = self.player.hasMedia(),
             .video_backend_status = interop_status,
+            .video_fallback_reason = fallback_reason,
         };
     }
 

@@ -217,7 +217,17 @@ fn sourceFrameForScale(decoder: *c.VideoDecoder) ?*c.AVFrame {
         return null;
     }
 
-    if (decoder.hw_enabled != 0 and decoder.sw_frame != null and decoder.sw_frame.*.data[0] != null) {
+    if (decoder.hw_enabled != 0 and decoder.frame.?.*.format == decoder.hw_pix_fmt) {
+        if (decoder.sw_frame == null) {
+            return null;
+        }
+
+        c.av_frame_unref(decoder.sw_frame);
+        if (c.av_hwframe_transfer_data(decoder.sw_frame, decoder.frame, 0) < 0) {
+            return null;
+        }
+
+        _ = c.av_frame_copy_props(decoder.sw_frame, decoder.frame);
         return decoder.sw_frame;
     }
 
@@ -228,6 +238,7 @@ fn decodeFormatTag(pix_fmt: c.AVPixelFormat) c_int {
     return switch (pix_fmt) {
         c.AV_PIX_FMT_YUV420P => c.VIDEO_FRAME_FORMAT_YUV420P,
         c.AV_PIX_FMT_NV12 => c.VIDEO_FRAME_FORMAT_NV12,
+        c.AV_PIX_FMT_VIDEOTOOLBOX => c.VIDEO_FRAME_FORMAT_NV12,
         else => c.VIDEO_FRAME_FORMAT_RGBA,
     };
 }
@@ -397,17 +408,6 @@ pub export fn video_decoder_decode_frame(dec: ?*c.VideoDecoder, demuxer: ?*c.Dem
 
         if (ret == 0) {
             if (d.hw_enabled != 0 and d.frame.*.format == d.hw_pix_fmt) {
-                if (d.sw_frame == null) {
-                    return -1;
-                }
-
-                c.av_frame_unref(d.sw_frame);
-                if (c.av_hwframe_transfer_data(d.sw_frame, d.frame, 0) < 0) {
-                    return -1;
-                }
-
-                _ = c.av_frame_copy_props(d.sw_frame, d.frame);
-
                 if (refreshHardwareFrameRef(d) != 0) {
                     return -1;
                 }
@@ -507,8 +507,11 @@ pub export fn video_decoder_get_format(dec: ?*c.VideoDecoder) c_int {
         return c.VIDEO_FRAME_FORMAT_RGBA;
     }
 
-    const src_frame = sourceFrameForScale(dec.?) orelse return c.VIDEO_FRAME_FORMAT_RGBA;
-    const pix_fmt: c.AVPixelFormat = src_frame.*.format;
+    if (dec.?.frame == null) {
+        return c.VIDEO_FRAME_FORMAT_RGBA;
+    }
+
+    const pix_fmt: c.AVPixelFormat = dec.?.frame.*.format;
     return decodeFormatTag(pix_fmt);
 }
 
@@ -606,4 +609,8 @@ test "planeCountForFormatTag reports expected yuv plane counts" {
     try std.testing.expectEqual(@as(c_int, 1), planeCountForFormatTag(c.VIDEO_FRAME_FORMAT_RGBA));
     try std.testing.expectEqual(@as(c_int, 3), planeCountForFormatTag(c.VIDEO_FRAME_FORMAT_YUV420P));
     try std.testing.expectEqual(@as(c_int, 2), planeCountForFormatTag(c.VIDEO_FRAME_FORMAT_NV12));
+}
+
+test "video_decoder true path maps videotoolbox source metadata to nv12" {
+    try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_NV12), decodeFormatTag(c.AV_PIX_FMT_VIDEOTOOLBOX));
 }

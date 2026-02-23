@@ -191,3 +191,21 @@ git commit -m "docs: record true-zero-copy acceptance evidence"
 - No persistent tint/corruption during interop <-> true transitions.
 - No Vulkan validation spam in default and forced runs.
 - `zig build` and `zig build test` pass.
+
+## Release Evidence (2026-02-23)
+
+- Build/test verification:
+  - `zig build` -> pass
+  - `zig build test` -> pass
+  - `zig build test -- --test-filter "video_pipeline"` -> pass
+  - `zig build test -- --test-filter "true-zero-copy"` -> pass
+- Runtime smoke verification (interactive app launch, bounded by CLI timeout):
+  - `ZC_VIDEO_BACKEND_MODE=software zig build run -- '/Volumes/collections/艾尔登法环/meilinna1.mp4'` -> launched/stable (no immediate crash)
+  - `ZC_VIDEO_BACKEND_MODE=zero_copy zig build run -- '/Volumes/collections/艾尔登法环/meilinna1.mp4'` -> launched/stable (no immediate crash)
+  - `ZC_VIDEO_BACKEND_MODE=zero_copy ZC_FORCE_INTEROP_HANDLE=1 zig build run -- '/Volumes/collections/艾尔登法环/meilinna1.mp4'` -> launched/stable (no immediate crash)
+  - `ZC_VIDEO_BACKEND_MODE=zero_copy ZC_EXPERIMENTAL_TRUE_ZERO_COPY=1 zig build run -- '/Volumes/collections/艾尔登法环/meilinna1.mp4'` -> launched/stable (no immediate crash)
+- Manual visual checks confirmed during execution:
+  - Forced interop path (`ZC_FORCE_INTEROP_HANDLE=1`) displays correct color without false `import-failure` noise.
+  - True-path transition color corruption resolved after renderer import layout/memory corrections and UV workaround removal.
+- Remaining operational safety:
+  - `ZC_FORCE_INTEROP_HANDLE=1` preserved as immediate production escape hatch.

@@ -141,7 +141,7 @@ fn queuePushLocked(
         }
     }
 
-    const retain_token = source_hw != 0 and gpu_token != 0;
+    const retain_token = gpu_only_frame and gpu_token != 0;
     const retained_gpu_token = if (retain_token) retainGpuToken(gpu_token) else 0;
     if (retain_token and retained_gpu_token == 0) {
         return -1;

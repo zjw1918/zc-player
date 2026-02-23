@@ -47,6 +47,8 @@ pub const MacVideoToolboxBackend = struct {
     has_frame: bool = false,
     hw_frame_streak: u32 = 0,
     true_zero_copy_capable: bool = false,
+    frame_generation: u32 = 0,
+    frame_in_flight: bool = false,
 
     pub fn init(self: *MacVideoToolboxBackend) void {
         self.initialized = true;
@@ -54,6 +56,8 @@ pub const MacVideoToolboxBackend = struct {
         self.has_frame = false;
         self.hw_frame_streak = 0;
         self.true_zero_copy_capable = self.capabilities().true_zero_copy;
+        self.frame_generation = 0;
+        self.frame_in_flight = false;
     }
 
     pub fn deinit(self: *MacVideoToolboxBackend) void {
@@ -62,6 +66,8 @@ pub const MacVideoToolboxBackend = struct {
         self.has_frame = false;
         self.hw_frame_streak = 0;
         self.true_zero_copy_capable = false;
+        self.frame_generation = 0;
+        self.frame_in_flight = false;
     }
 
     pub fn capabilities(_: *const MacVideoToolboxBackend) Capabilities {
@@ -103,6 +109,8 @@ pub const MacVideoToolboxBackend = struct {
         self.host_frame.source_is_hw = if (frame.source_hw) 1 else 0;
         self.host_frame.payload_kind = c.RENDERER_INTEROP_PAYLOAD_HOST;
         self.host_frame.gpu_token = 0;
+        self.frame_generation +%= 1;
+        self.frame_in_flight = false;
         if (frame.source_hw) {
             self.hw_frame_streak += 1;
         } else {
@@ -122,10 +130,35 @@ pub const MacVideoToolboxBackend = struct {
         if (!self.has_frame) {
             return null;
         }
+        if (self.frame_in_flight) {
+            return null;
+        }
+
+        self.frame_in_flight = true;
 
         return InteropHandle{
             .token = @intFromPtr(&self.host_frame),
         };
+    }
+
+    pub fn resolveHandle(self: *MacVideoToolboxBackend, handle: InteropHandle) ?*c.RendererInteropHostFrame {
+        if (!self.frame_in_flight) {
+            return null;
+        }
+
+        if (handle.token != @intFromPtr(&self.host_frame)) {
+            return null;
+        }
+
+        return &self.host_frame;
+    }
+
+    pub fn releaseRenderableFrame(self: *MacVideoToolboxBackend, handle: InteropHandle) void {
+        if (handle.token != @intFromPtr(&self.host_frame)) {
+            return;
+        }
+
+        self.frame_in_flight = false;
     }
 };
 
@@ -196,4 +229,28 @@ test "interop contract marks host bridge payload kind" {
 
     try backend.submitDecodedFrame(frame);
     try std.testing.expectEqual(@as(c_int, c.RENDERER_INTEROP_PAYLOAD_HOST), backend.host_frame.payload_kind);
+}
+
+test "in-flight frame slot lifecycle requires release before reacquire" {
+    var backend = MacVideoToolboxBackend{};
+    backend.init();
+    defer backend.deinit();
+
+    const frame = SoftwareUploadBackendMod.SoftwarePlaneFrame{
+        .planes = .{ null, null, null },
+        .linesizes = .{ 0, 0, 0 },
+        .plane_count = 1,
+        .width = 16,
+        .height = 16,
+        .format = 0,
+        .pts = 0.0,
+        .source_hw = false,
+    };
+
+    try backend.submitDecodedFrame(frame);
+    const handle = (try backend.acquireRenderableFrame()).?;
+    try std.testing.expect((try backend.acquireRenderableFrame()) == null);
+
+    backend.releaseRenderableFrame(handle);
+    try std.testing.expect((try backend.acquireRenderableFrame()) != null);
 }

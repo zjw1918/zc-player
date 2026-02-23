@@ -7,6 +7,9 @@ const c = @cImport({
     @cInclude("renderer/renderer.h");
 });
 
+const frame_format_rgba: c_int = 0;
+const frame_format_nv12: c_int = 2;
+
 fn probeTrueZeroCopySupportForValue(flag_value: ?[]const u8, has_vt: bool, is_macos: bool) bool {
     if (!is_macos or !has_vt) {
         return false;
@@ -21,6 +24,7 @@ fn trueZeroCopyActiveForStreak(capable: bool, hw_frame_streak: u32, threshold: u
 }
 
 const true_zero_copy_hw_streak_threshold: u32 = 12;
+const true_zero_copy_required_format: c_int = frame_format_nv12;
 
 pub const Capabilities = struct {
     interop_handle: bool,
@@ -49,6 +53,7 @@ pub const MacVideoToolboxBackend = struct {
     true_zero_copy_capable: bool = false,
     frame_generation: u32 = 0,
     frame_in_flight: bool = false,
+    last_frame_format: c_int = frame_format_rgba,
 
     pub fn init(self: *MacVideoToolboxBackend) void {
         self.initialized = true;
@@ -58,6 +63,7 @@ pub const MacVideoToolboxBackend = struct {
         self.true_zero_copy_capable = self.capabilities().true_zero_copy;
         self.frame_generation = 0;
         self.frame_in_flight = false;
+        self.last_frame_format = frame_format_rgba;
     }
 
     pub fn deinit(self: *MacVideoToolboxBackend) void {
@@ -68,6 +74,7 @@ pub const MacVideoToolboxBackend = struct {
         self.true_zero_copy_capable = false;
         self.frame_generation = 0;
         self.frame_in_flight = false;
+        self.last_frame_format = frame_format_rgba;
     }
 
     pub fn capabilities(_: *const MacVideoToolboxBackend) Capabilities {
@@ -107,6 +114,7 @@ pub const MacVideoToolboxBackend = struct {
         self.host_frame.height = frame.height;
         self.host_frame.format = frame.format;
         self.host_frame.source_is_hw = if (frame.source_hw) 1 else 0;
+        self.last_frame_format = frame.format;
         self.host_frame.payload_kind = c.RENDERER_INTEROP_PAYLOAD_HOST;
         self.host_frame.gpu_token = 0;
         self.frame_generation +%= 1;
@@ -120,6 +128,10 @@ pub const MacVideoToolboxBackend = struct {
     }
 
     pub fn trueZeroCopyActive(self: *const MacVideoToolboxBackend) bool {
+        if (self.last_frame_format != true_zero_copy_required_format) {
+            return false;
+        }
+
         return trueZeroCopyActiveForStreak(self.true_zero_copy_capable, self.hw_frame_streak, true_zero_copy_hw_streak_threshold);
     }
 
@@ -209,6 +221,18 @@ test "true zero-copy active requires sustained hardware frames" {
     try std.testing.expect(!trueZeroCopyActiveForStreak(true, 5, 12));
     try std.testing.expect(trueZeroCopyActiveForStreak(true, 12, 12));
     try std.testing.expect(!trueZeroCopyActiveForStreak(false, 20, 12));
+}
+
+test "true zero-copy active requires nv12 format" {
+    var backend = MacVideoToolboxBackend{};
+    backend.init();
+    defer backend.deinit();
+
+    backend.true_zero_copy_capable = true;
+    backend.hw_frame_streak = true_zero_copy_hw_streak_threshold;
+    backend.last_frame_format = frame_format_rgba;
+
+    try std.testing.expect(!backend.trueZeroCopyActive());
 }
 
 test "interop contract marks host bridge payload kind" {

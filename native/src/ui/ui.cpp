@@ -20,6 +20,7 @@ typedef struct {
     int action_count;
     PlaybackSnapshot snapshot;
     int has_snapshot;
+    int show_debug_panel;
     int initialized;
 } UIRuntime;
 
@@ -102,6 +103,86 @@ static const char* fallback_reason_label(int reason) {
         default:
             return "unknown";
     }
+}
+
+static const char* hw_backend_label(int backend) {
+    switch (backend) {
+        case VIDEO_HW_BACKEND_NONE:
+            return "none";
+        case VIDEO_HW_BACKEND_VIDEOTOOLBOX:
+            return "videotoolbox";
+        case VIDEO_HW_BACKEND_D3D11VA:
+            return "d3d11va";
+        case VIDEO_HW_BACKEND_DXVA2:
+            return "dxva2";
+        default:
+            return "unknown";
+    }
+}
+
+static const char* hw_policy_label(int policy) {
+    switch (policy) {
+        case VIDEO_HW_POLICY_AUTO:
+            return "auto";
+        case VIDEO_HW_POLICY_OFF:
+            return "off";
+        case VIDEO_HW_POLICY_D3D11VA:
+            return "d3d11va";
+        case VIDEO_HW_POLICY_DXVA2:
+            return "dxva2";
+        case VIDEO_HW_POLICY_VIDEOTOOLBOX:
+            return "videotoolbox";
+        default:
+            return "unknown";
+    }
+}
+
+static void draw_debug_panel(const PlaybackSnapshot* snapshot) {
+    if (!snapshot) {
+        return;
+    }
+
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x + 12.0f, viewport->Pos.y + 12.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.78f);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove;
+    if (!ImGui::Begin("Stats for Nerds", NULL, flags)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::Text("Container: %s", snapshot->media_format[0] ? snapshot->media_format : "unknown");
+    ImGui::Text("Mux Bitrate: %d kbps", snapshot->media_bitrate_kbps);
+    ImGui::Separator();
+
+    ImGui::Text("Video Codec: %s", snapshot->video_codec[0] ? snapshot->video_codec : "unknown");
+    ImGui::Text("Video Bitrate: %d kbps", snapshot->video_bitrate_kbps);
+    if (snapshot->video_fps_num > 0 && snapshot->video_fps_den > 0) {
+        ImGui::Text("FPS: %.3f (%d/%d)",
+                    (double)snapshot->video_fps_num / (double)snapshot->video_fps_den,
+                    snapshot->video_fps_num,
+                    snapshot->video_fps_den);
+    } else {
+        ImGui::TextUnformatted("FPS: unknown");
+    }
+
+    ImGui::Separator();
+    if (snapshot->has_media) {
+        ImGui::Text("Audio Codec: %s", snapshot->audio_codec[0] ? snapshot->audio_codec : "none");
+        ImGui::Text("Audio Bitrate: %d kbps", snapshot->audio_bitrate_kbps);
+        ImGui::Text("Audio: %d Hz / %d ch", snapshot->audio_sample_rate, snapshot->audio_channels);
+    }
+
+    ImGui::Separator();
+    ImGui::Text("HW Decode: %s", snapshot->video_hw_enabled ? "on" : "off");
+    ImGui::Text("HW Backend: %s", hw_backend_label(snapshot->video_hw_backend));
+    ImGui::Text("HW Policy: %s", hw_policy_label(snapshot->video_hw_policy));
+    ImGui::Text("Interop Backend: %s", backend_status_label(snapshot->video_backend_status));
+    ImGui::Text("Fallback: %s", fallback_reason_label(snapshot->video_fallback_reason));
+
+    ImGui::End();
 }
 
 static void SDLCALL open_file_dialog_callback(void* userdata, const char* const* filelist, int filter) {
@@ -365,14 +446,28 @@ void ui_render(UIState* ui, const PlaybackSnapshot* snapshot) {
             queue_action(UI_ACTION_SET_SPEED, (double)speed);
         }
 
+        ImGui::SameLine();
+        if (ImGui::Button(g_ui_runtime.show_debug_panel ? "Hide Stats" : "Show Stats")) {
+            g_ui_runtime.show_debug_panel = !g_ui_runtime.show_debug_panel;
+        }
+
         ImGui::Text("Backend: %s", backend_status_label(snapshot->video_backend_status));
         ImGui::SameLine();
         ImGui::Text("Fallback: %s", fallback_reason_label(snapshot->video_fallback_reason));
         ImGui::SameLine();
-        ImGui::TextUnformatted("  Space Play/Pause  Left/Right Seek  Up/Down Volume");
+        ImGui::Text("HW: %s/%s (%s)",
+                    snapshot->video_hw_enabled ? "on" : "off",
+                    hw_backend_label(snapshot->video_hw_backend),
+                    hw_policy_label(snapshot->video_hw_policy));
+        ImGui::SameLine();
+        ImGui::TextUnformatted("  Space Play/Pause  Left/Right Seek  Up/Down Volume  I Stats");
     }
     ImGui::End();
     ImGui::PopStyleVar(4);
+
+    if (g_ui_runtime.show_debug_panel && snapshot && snapshot->has_media) {
+        draw_debug_panel(snapshot);
+    }
 
     ImGui::Render();
 }
@@ -397,6 +492,11 @@ void ui_process_event(void* event) {
         return;
     }
     if (sdl_event->type != SDL_EVENT_KEY_DOWN || sdl_event->key.repeat) {
+        return;
+    }
+
+    if (sdl_event->key.key == SDLK_I) {
+        g_ui_runtime.show_debug_panel = !g_ui_runtime.show_debug_panel;
         return;
     }
 

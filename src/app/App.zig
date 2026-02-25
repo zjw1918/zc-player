@@ -4,6 +4,8 @@ const SnapshotMod = @import("../engine/Snapshot.zig");
 const PlaybackState = SnapshotMod.PlaybackState;
 const VideoBackendStatus = SnapshotMod.VideoBackendStatus;
 const VideoFallbackReason = SnapshotMod.VideoFallbackReason;
+const VideoHwBackend = SnapshotMod.VideoHwBackend;
+const VideoHwPolicy = SnapshotMod.VideoHwPolicy;
 const gui = @import("../ffi/gui.zig").c;
 const libc = @cImport({
     @cInclude("stdlib.h");
@@ -66,6 +68,25 @@ fn toGuiFallbackReason(reason: VideoFallbackReason) c_int {
         .backend_failure => gui.VIDEO_FALLBACK_REASON_BACKEND_FAILURE,
         .import_failure => gui.VIDEO_FALLBACK_REASON_IMPORT_FAILURE,
         .format_not_supported => gui.VIDEO_FALLBACK_REASON_FORMAT_NOT_SUPPORTED,
+    };
+}
+
+fn toGuiHwBackend(backend: VideoHwBackend) c_int {
+    return switch (backend) {
+        .none => gui.VIDEO_HW_BACKEND_NONE,
+        .videotoolbox => gui.VIDEO_HW_BACKEND_VIDEOTOOLBOX,
+        .d3d11va => gui.VIDEO_HW_BACKEND_D3D11VA,
+        .dxva2 => gui.VIDEO_HW_BACKEND_DXVA2,
+    };
+}
+
+fn toGuiHwPolicy(policy: VideoHwPolicy) c_int {
+    return switch (policy) {
+        .auto => gui.VIDEO_HW_POLICY_AUTO,
+        .off => gui.VIDEO_HW_POLICY_OFF,
+        .d3d11va => gui.VIDEO_HW_POLICY_D3D11VA,
+        .dxva2 => gui.VIDEO_HW_POLICY_DXVA2,
+        .videotoolbox => gui.VIDEO_HW_POLICY_VIDEOTOOLBOX,
     };
 }
 
@@ -331,6 +352,19 @@ pub const App = struct {
                 .has_media = if (snapshot.has_media) 1 else 0,
                 .video_backend_status = toGuiBackendStatus(snapshot.video_backend_status),
                 .video_fallback_reason = toGuiFallbackReason(snapshot.video_fallback_reason),
+                .video_hw_enabled = if (snapshot.video_hw_enabled) 1 else 0,
+                .video_hw_backend = toGuiHwBackend(snapshot.video_hw_backend),
+                .video_hw_policy = toGuiHwPolicy(snapshot.video_hw_policy),
+                .media_format = snapshot.media_format,
+                .media_bitrate_kbps = snapshot.media_bitrate_kbps,
+                .video_codec = snapshot.video_codec,
+                .video_bitrate_kbps = snapshot.video_bitrate_kbps,
+                .video_fps_num = snapshot.video_fps_num,
+                .video_fps_den = snapshot.video_fps_den,
+                .audio_codec = snapshot.audio_codec,
+                .audio_bitrate_kbps = snapshot.audio_bitrate_kbps,
+                .audio_sample_rate = snapshot.audio_sample_rate,
+                .audio_channels = snapshot.audio_channels,
             };
 
             gui.ui_new_frame();
@@ -380,6 +414,19 @@ test "toGuiFallbackReason maps interop fallback reasons" {
     try std.testing.expectEqual(@as(c_int, gui.VIDEO_FALLBACK_REASON_BACKEND_FAILURE), toGuiFallbackReason(.backend_failure));
     try std.testing.expectEqual(@as(c_int, gui.VIDEO_FALLBACK_REASON_IMPORT_FAILURE), toGuiFallbackReason(.import_failure));
     try std.testing.expectEqual(@as(c_int, gui.VIDEO_FALLBACK_REASON_FORMAT_NOT_SUPPORTED), toGuiFallbackReason(.format_not_supported));
+}
+
+test "toGuiHwBackend maps decoder backends" {
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_HW_BACKEND_NONE), toGuiHwBackend(.none));
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_HW_BACKEND_D3D11VA), toGuiHwBackend(.d3d11va));
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_HW_BACKEND_DXVA2), toGuiHwBackend(.dxva2));
+}
+
+test "toGuiHwPolicy maps decoder policies" {
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_HW_POLICY_AUTO), toGuiHwPolicy(.auto));
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_HW_POLICY_OFF), toGuiHwPolicy(.off));
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_HW_POLICY_D3D11VA), toGuiHwPolicy(.d3d11va));
+    try std.testing.expectEqual(@as(c_int, gui.VIDEO_HW_POLICY_DXVA2), toGuiHwPolicy(.dxva2));
 }
 
 test "selectInteropSubmitPath chooses true-zero-copy when active" {

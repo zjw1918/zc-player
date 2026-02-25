@@ -20,6 +20,21 @@ pub const VideoFallbackReason = enum {
     format_not_supported,
 };
 
+pub const VideoHwBackend = enum {
+    none,
+    videotoolbox,
+    d3d11va,
+    dxva2,
+};
+
+pub const VideoHwPolicy = enum {
+    auto,
+    off,
+    d3d11va,
+    dxva2,
+    videotoolbox,
+};
+
 pub const Snapshot = struct {
     state: PlaybackState = .stopped,
     current_time: f64 = 0.0,
@@ -29,6 +44,19 @@ pub const Snapshot = struct {
     has_media: bool = false,
     video_backend_status: VideoBackendStatus = .software,
     video_fallback_reason: VideoFallbackReason = .none,
+    video_hw_enabled: bool = false,
+    video_hw_backend: VideoHwBackend = .none,
+    video_hw_policy: VideoHwPolicy = .auto,
+    media_format: [32]u8 = [_]u8{0} ** 32,
+    media_bitrate_kbps: i32 = 0,
+    video_codec: [32]u8 = [_]u8{0} ** 32,
+    video_bitrate_kbps: i32 = 0,
+    video_fps_num: i32 = 0,
+    video_fps_den: i32 = 0,
+    audio_codec: [32]u8 = [_]u8{0} ** 32,
+    audio_bitrate_kbps: i32 = 0,
+    audio_sample_rate: i32 = 0,
+    audio_channels: i32 = 0,
 };
 
 pub fn stateLabel(state: PlaybackState) []const u8 {

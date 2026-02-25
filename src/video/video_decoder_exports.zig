@@ -51,6 +51,15 @@ fn hwDeviceLabel(device_type: c.AVHWDeviceType) []const u8 {
     };
 }
 
+fn hwBackendTag(device_type: c.AVHWDeviceType) c_int {
+    return switch (device_type) {
+        c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX => c.VIDEO_HW_BACKEND_VIDEOTOOLBOX,
+        c.AV_HWDEVICE_TYPE_D3D11VA => c.VIDEO_HW_BACKEND_D3D11VA,
+        c.AV_HWDEVICE_TYPE_DXVA2 => c.VIDEO_HW_BACKEND_DXVA2,
+        else => c.VIDEO_HW_BACKEND_NONE,
+    };
+}
+
 fn hwPolicyLabel(policy: HwDecodePolicy) []const u8 {
     return switch (policy) {
         .auto => "auto",
@@ -58,6 +67,16 @@ fn hwPolicyLabel(policy: HwDecodePolicy) []const u8 {
         .d3d11va => "d3d11va",
         .dxva2 => "dxva2",
         .videotoolbox => "videotoolbox",
+    };
+}
+
+fn hwPolicyTag(policy: HwDecodePolicy) c_int {
+    return switch (policy) {
+        .auto => c.VIDEO_HW_POLICY_AUTO,
+        .off => c.VIDEO_HW_POLICY_OFF,
+        .d3d11va => c.VIDEO_HW_POLICY_D3D11VA,
+        .dxva2 => c.VIDEO_HW_POLICY_DXVA2,
+        .videotoolbox => c.VIDEO_HW_POLICY_VIDEOTOOLBOX,
     };
 }
 
@@ -624,6 +643,18 @@ pub export fn video_decoder_is_hw_enabled(dec: ?*c.VideoDecoder) c_int {
     }
 
     return dec.?.hw_enabled;
+}
+
+pub export fn video_decoder_get_hw_backend(dec: ?*c.VideoDecoder) c_int {
+    if (dec == null) {
+        return c.VIDEO_HW_BACKEND_NONE;
+    }
+
+    return hwBackendTag(dec.?.hw_device_type);
+}
+
+pub export fn video_decoder_get_hw_policy() c_int {
+    return hwPolicyTag(hwDecodePolicyFromEnvironment());
 }
 
 pub export fn video_decoder_get_hw_frame_token(dec: ?*c.VideoDecoder) u64 {

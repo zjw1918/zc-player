@@ -127,6 +127,14 @@ pub const Player = struct {
         return c.player_is_video_hw_enabled(&self.handle) != 0;
     }
 
+    pub fn videoHwBackend(self: *Player) c_int {
+        return c.player_get_video_hw_backend(&self.handle);
+    }
+
+    pub fn videoHwPolicy(self: *Player) c_int {
+        return c.player_get_video_hw_policy(&self.handle);
+    }
+
     pub fn videoPlanes(self: *Player) ?VideoPlanes {
         var planes: [4][*c]u8 = .{ null, null, null, null };
         var linesizes: [4]c_int = .{ 0, 0, 0, 0 };

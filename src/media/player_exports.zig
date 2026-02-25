@@ -460,6 +460,19 @@ pub export fn player_is_video_hw_enabled(player: ?*c.Player) c_int {
     return c.video_decoder_is_hw_enabled(&player.?.decoder);
 }
 
+pub export fn player_get_video_hw_backend(player: ?*c.Player) c_int {
+    if (player == null) {
+        return c.VIDEO_HW_BACKEND_NONE;
+    }
+
+    return c.video_decoder_get_hw_backend(&player.?.decoder);
+}
+
+pub export fn player_get_video_hw_policy(player: ?*c.Player) c_int {
+    _ = player;
+    return c.video_decoder_get_hw_policy();
+}
+
 pub export fn player_get_video_hw_frame_token(player: ?*c.Player) u64 {
     if (player == null) {
         return 0;

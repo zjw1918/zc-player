@@ -54,6 +54,19 @@ typedef struct {
     int has_media;
     int video_backend_status;
     int video_fallback_reason;
+    int video_hw_enabled;
+    int video_hw_backend;
+    int video_hw_policy;
+    char media_format[32];
+    int media_bitrate_kbps;
+    char video_codec[32];
+    int video_bitrate_kbps;
+    int video_fps_num;
+    int video_fps_den;
+    char audio_codec[32];
+    int audio_bitrate_kbps;
+    int audio_sample_rate;
+    int audio_channels;
 } PlaybackSnapshot;
 
 typedef struct {

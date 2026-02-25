@@ -120,7 +120,8 @@ pub const VideoInterop = struct {
     }
 
     pub fn selectionModeFromEnvironment() SelectionMode {
-        const value = std.posix.getenv("ZC_VIDEO_BACKEND_MODE");
+        const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ZC_VIDEO_BACKEND_MODE") catch null;
+        defer if (value) |v| std.heap.page_allocator.free(v);
         if (value == null) {
             return .auto;
         }

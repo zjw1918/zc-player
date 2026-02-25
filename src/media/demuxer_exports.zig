@@ -420,7 +420,10 @@ fn demuxerPopPacket(demuxer: *c.Demuxer, queue: *c.DemuxerPacketQueue, can_read:
     }
 
     if (queue.count > 0) {
-        _ = queuePop(queue, out_packet);
+        if (queuePop(queue, out_packet) != 0) {
+            _ = c.SDL_UnlockMutex(demuxer.mutex);
+            return -1;
+        }
         if (demuxer.can_write != null) {
             _ = c.SDL_SignalCondition(demuxer.can_write);
         }

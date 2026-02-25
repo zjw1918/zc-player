@@ -75,7 +75,7 @@ fn disableHardwareDecode(decoder: *c.VideoDecoder) void {
         c.av_buffer_unref(&codec_ctx.*.hw_device_ctx);
     }
 
-    codec_ctx.*.get_format = null;
+    codec_ctx.*.get_format = c.avcodec_default_get_format;
     codec_ctx.*.@"opaque" = null;
 }
 

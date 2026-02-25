@@ -5,8 +5,24 @@ const c = @cImport({
     @cInclude("player/demuxer.h");
 });
 
-fn shouldTryVideoToolbox(codec_ctx: ?*c.AVCodecContext) bool {
-    if (builtin.os.tag != .macos or codec_ctx == null) {
+fn hwDecodeDebugEnabled() bool {
+    const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ZC_DEBUG_HW_DECODE") catch return false;
+    defer std.heap.page_allocator.free(value);
+
+    return value.len > 0 and value[0] != '0';
+}
+
+fn hwDeviceLabel(device_type: c.AVHWDeviceType) []const u8 {
+    return switch (device_type) {
+        c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX => "videotoolbox",
+        c.AV_HWDEVICE_TYPE_D3D11VA => "d3d11va",
+        c.AV_HWDEVICE_TYPE_DXVA2 => "dxva2",
+        else => "none",
+    };
+}
+
+fn shouldTryHardware(codec_ctx: ?*c.AVCodecContext) bool {
+    if (codec_ctx == null) {
         return false;
     }
 
@@ -15,7 +31,11 @@ fn shouldTryVideoToolbox(codec_ctx: ?*c.AVCodecContext) bool {
         return false;
     }
 
-    return c.av_hwdevice_find_type_by_name("videotoolbox") != c.AV_HWDEVICE_TYPE_NONE;
+    return switch (builtin.os.tag) {
+        .macos => c.av_hwdevice_find_type_by_name("videotoolbox") != c.AV_HWDEVICE_TYPE_NONE,
+        .windows => c.av_hwdevice_find_type_by_name("d3d11va") != c.AV_HWDEVICE_TYPE_NONE or c.av_hwdevice_find_type_by_name("dxva2") != c.AV_HWDEVICE_TYPE_NONE,
+        else => false,
+    };
 }
 
 fn chooseOutputPixelFormat(preferred: c.AVPixelFormat, pix_fmts: [*c]const c.AVPixelFormat) c.AVPixelFormat {
@@ -29,7 +49,7 @@ fn chooseOutputPixelFormat(preferred: c.AVPixelFormat, pix_fmts: [*c]const c.AVP
     return pix_fmts[0];
 }
 
-fn selectVideoToolboxPixelFormat(codec: ?*const c.AVCodec) c.AVPixelFormat {
+fn selectHardwarePixelFormat(codec: ?*const c.AVCodec, device_type: c.AVHWDeviceType) c.AVPixelFormat {
     if (codec == null) {
         return c.AV_PIX_FMT_NONE;
     }
@@ -42,7 +62,7 @@ fn selectVideoToolboxPixelFormat(codec: ?*const c.AVCodec) c.AVPixelFormat {
         }
 
         if ((config.?.*.methods & c.AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) != 0 and
-            config.?.*.device_type == c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX)
+            config.?.*.device_type == device_type)
         {
             return config.?.*.pix_fmt;
         }
@@ -68,6 +88,7 @@ fn decoderGetFormat(codec_ctx: ?*c.AVCodecContext, pix_fmts: [*c]const c.AVPixel
 fn disableHardwareDecode(decoder: *c.VideoDecoder) void {
     decoder.hw_enabled = 0;
     decoder.hw_pix_fmt = c.AV_PIX_FMT_NONE;
+    decoder.hw_device_type = c.AV_HWDEVICE_TYPE_NONE;
 
     const codec_ctx = decoder.codec_ctx orelse return;
 
@@ -111,31 +132,41 @@ fn configureHardwareDecode(decoder: *c.VideoDecoder, codec: ?*const c.AVCodec) v
 
     const codec_ctx = decoder.codec_ctx orelse return;
 
-    if (!shouldTryVideoToolbox(codec_ctx)) {
+    if (!shouldTryHardware(codec_ctx)) {
         return;
     }
 
-    const hw_pix_fmt = selectVideoToolboxPixelFormat(codec);
-    if (hw_pix_fmt == c.AV_PIX_FMT_NONE) {
+    const candidates = switch (builtin.os.tag) {
+        .macos => [_]c.AVHWDeviceType{c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX},
+        .windows => [_]c.AVHWDeviceType{ c.AV_HWDEVICE_TYPE_D3D11VA, c.AV_HWDEVICE_TYPE_DXVA2 },
+        else => [_]c.AVHWDeviceType{},
+    };
+
+    for (candidates) |device_type| {
+        const hw_pix_fmt = selectHardwarePixelFormat(codec, device_type);
+        if (hw_pix_fmt == c.AV_PIX_FMT_NONE) {
+            continue;
+        }
+
+        var hw_device_ctx: ?*c.AVBufferRef = null;
+        if (c.av_hwdevice_ctx_create(&hw_device_ctx, device_type, null, null, 0) < 0 or hw_device_ctx == null) {
+            continue;
+        }
+
+        codec_ctx.*.hw_device_ctx = c.av_buffer_ref(hw_device_ctx);
+        c.av_buffer_unref(&hw_device_ctx);
+
+        if (codec_ctx.*.hw_device_ctx == null) {
+            continue;
+        }
+
+        codec_ctx.*.@"opaque" = decoder;
+        codec_ctx.*.get_format = decoderGetFormat;
+        decoder.hw_pix_fmt = hw_pix_fmt;
+        decoder.hw_device_type = device_type;
+        decoder.hw_enabled = 1;
         return;
     }
-
-    var hw_device_ctx: ?*c.AVBufferRef = null;
-    if (c.av_hwdevice_ctx_create(&hw_device_ctx, c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX, null, null, 0) < 0 or hw_device_ctx == null) {
-        return;
-    }
-
-    codec_ctx.*.hw_device_ctx = c.av_buffer_ref(hw_device_ctx);
-    c.av_buffer_unref(&hw_device_ctx);
-
-    if (codec_ctx.*.hw_device_ctx == null) {
-        return;
-    }
-
-    codec_ctx.*.@"opaque" = decoder;
-    codec_ctx.*.get_format = decoderGetFormat;
-    decoder.hw_pix_fmt = hw_pix_fmt;
-    decoder.hw_enabled = 1;
 }
 
 fn ensureRgbaBuffer(decoder: *c.VideoDecoder, width: c_int, height: c_int) c_int {
@@ -239,6 +270,8 @@ fn decodeFormatTag(pix_fmt: c.AVPixelFormat) c_int {
         c.AV_PIX_FMT_YUV420P => c.VIDEO_FRAME_FORMAT_YUV420P,
         c.AV_PIX_FMT_NV12 => c.VIDEO_FRAME_FORMAT_NV12,
         c.AV_PIX_FMT_VIDEOTOOLBOX => c.VIDEO_FRAME_FORMAT_NV12,
+        c.AV_PIX_FMT_D3D11 => c.VIDEO_FRAME_FORMAT_NV12,
+        c.AV_PIX_FMT_DXVA2_VLD => c.VIDEO_FRAME_FORMAT_NV12,
         else => c.VIDEO_FRAME_FORMAT_RGBA,
     };
 }
@@ -313,6 +346,13 @@ pub export fn video_decoder_init(dec: ?*c.VideoDecoder, stream: ?*c.AVStream) c_
     if (d.width > 0 and d.height > 0 and ensureRgbaBuffer(d, d.width, d.height) != 0) {
         video_decoder_destroy(d);
         return -1;
+    }
+
+    if (hwDecodeDebugEnabled()) {
+        std.debug.print(
+            "video_decoder_init: hw_enabled={} backend={s} hw_pix_fmt={} codec_id={}\n",
+            .{ d.hw_enabled, hwDeviceLabel(d.hw_device_type), @as(c_int, d.hw_pix_fmt), @as(c_uint, d.codec_ctx.*.codec_id) },
+        );
     }
 
     return 0;
@@ -613,4 +653,9 @@ test "planeCountForFormatTag reports expected yuv plane counts" {
 
 test "video_decoder true path maps videotoolbox source metadata to nv12" {
     try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_NV12), decodeFormatTag(c.AV_PIX_FMT_VIDEOTOOLBOX));
+}
+
+test "video_decoder maps windows hardware metadata to nv12" {
+    try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_NV12), decodeFormatTag(c.AV_PIX_FMT_D3D11));
+    try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_NV12), decodeFormatTag(c.AV_PIX_FMT_DXVA2_VLD));
 }

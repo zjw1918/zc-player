@@ -25,6 +25,7 @@ typedef struct {
     int sent_eof;
     enum AVPixelFormat sws_src_fmt;
     enum AVPixelFormat hw_pix_fmt;
+    enum AVHWDeviceType hw_device_type;
     int hw_enabled;
     uint8_t* temp_data[4];
     int temp_linesize[4];

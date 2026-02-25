@@ -8,7 +8,7 @@ const c = @cImport({
 
 const PLAYING_STATE = switch (@typeInfo(c.PlayerState)) {
     .@"enum" => @as(c.PlayerState, @enumFromInt(c.PLAYER_STATE_PLAYING)),
-    else => @as(c.PlayerState, @intCast(c.PLAYER_STATE_PLAYING))
+    else => @as(c.PlayerState, @intCast(c.PLAYER_STATE_PLAYING)),
 };
 
 const AUDIO_RING_MIN_SIZE: usize = 32768;
@@ -348,15 +348,11 @@ pub export fn audio_output_start(output: ?*c.AudioOutput) c_int {
         return -1;
     }
 
-    var spec = c.SDL_AudioSpec{
-        .freq = sample_rate,
-        .format = c.SDL_AUDIO_F32LE,
-        .channels = @intCast(channels)
-    };
+    var spec = c.SDL_AudioSpec{ .freq = sample_rate, .format = c.SDL_AUDIO_F32LE, .channels = @intCast(channels) };
 
     o.stream = c.SDL_OpenAudioDeviceStream(c.SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, audioCallback, o);
     if (o.stream == null) {
-        _ = c.fprintf(c.stderr(), "Failed to open audio stream: %s\n", c.SDL_GetError());
+        std.debug.print("Failed to open audio stream: {s}\n", .{c.SDL_GetError()});
         audio_output_destroy(o);
         return -1;
     }
@@ -382,7 +378,7 @@ pub export fn audio_output_start(output: ?*c.AudioOutput) c_int {
     o.decoded_end_pts = 0.0;
 
     if (!c.SDL_ResumeAudioStreamDevice(o.stream)) {
-        _ = c.fprintf(c.stderr(), "Failed to resume audio stream device: %s\n", c.SDL_GetError());
+        std.debug.print("Failed to resume audio stream device: {s}\n", .{c.SDL_GetError()});
     }
 
     return 0;
@@ -424,7 +420,7 @@ pub export fn audio_output_reset(output: ?*c.AudioOutput) void {
 
     if (o.stream != null) {
         if (!c.SDL_ResumeAudioStreamDevice(o.stream)) {
-            _ = c.fprintf(c.stderr(), "Failed to resume audio stream device: %s\n", c.SDL_GetError());
+            std.debug.print("Failed to resume audio stream device: {s}\n", .{c.SDL_GetError()});
         }
     }
 }
@@ -496,9 +492,9 @@ pub export fn audio_output_set_paused(output: ?*c.AudioOutput, paused: c_int) vo
         const ok = if (target_paused != 0) c.SDL_PauseAudioStreamDevice(o.stream) else c.SDL_ResumeAudioStreamDevice(o.stream);
         if (!ok) {
             if (target_paused != 0) {
-                _ = c.fprintf(c.stderr(), "Failed to pause audio stream device: %s\n", c.SDL_GetError());
+                std.debug.print("Failed to pause audio stream device: {s}\n", .{c.SDL_GetError()});
             } else {
-                _ = c.fprintf(c.stderr(), "Failed to resume audio stream device: %s\n", c.SDL_GetError());
+                std.debug.print("Failed to resume audio stream device: {s}\n", .{c.SDL_GetError()});
             }
         }
     }

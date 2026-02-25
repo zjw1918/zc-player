@@ -12,12 +12,52 @@ fn hwDecodeDebugEnabled() bool {
     return value.len > 0 and value[0] != '0';
 }
 
+const HwDecodePolicy = enum {
+    auto,
+    off,
+    d3d11va,
+    dxva2,
+    videotoolbox,
+};
+
+fn parseHwDecodePolicy(value: []const u8) HwDecodePolicy {
+    if (std.ascii.eqlIgnoreCase(value, "off") or std.ascii.eqlIgnoreCase(value, "none") or std.ascii.eqlIgnoreCase(value, "0")) {
+        return .off;
+    }
+    if (std.ascii.eqlIgnoreCase(value, "d3d11") or std.ascii.eqlIgnoreCase(value, "d3d11va")) {
+        return .d3d11va;
+    }
+    if (std.ascii.eqlIgnoreCase(value, "dxva2")) {
+        return .dxva2;
+    }
+    if (std.ascii.eqlIgnoreCase(value, "videotoolbox") or std.ascii.eqlIgnoreCase(value, "vt")) {
+        return .videotoolbox;
+    }
+    return .auto;
+}
+
+fn hwDecodePolicyFromEnvironment() HwDecodePolicy {
+    const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ZC_HW_DECODE") catch return .auto;
+    defer std.heap.page_allocator.free(value);
+    return parseHwDecodePolicy(value);
+}
+
 fn hwDeviceLabel(device_type: c.AVHWDeviceType) []const u8 {
     return switch (device_type) {
         c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX => "videotoolbox",
         c.AV_HWDEVICE_TYPE_D3D11VA => "d3d11va",
         c.AV_HWDEVICE_TYPE_DXVA2 => "dxva2",
         else => "none",
+    };
+}
+
+fn hwPolicyLabel(policy: HwDecodePolicy) []const u8 {
+    return switch (policy) {
+        .auto => "auto",
+        .off => "off",
+        .d3d11va => "d3d11va",
+        .dxva2 => "dxva2",
+        .videotoolbox => "videotoolbox",
     };
 }
 
@@ -132,41 +172,64 @@ fn configureHardwareDecode(decoder: *c.VideoDecoder, codec: ?*const c.AVCodec) v
 
     const codec_ctx = decoder.codec_ctx orelse return;
 
+    const policy = hwDecodePolicyFromEnvironment();
+    if (policy == .off) {
+        return;
+    }
+
     if (!shouldTryHardware(codec_ctx)) {
         return;
     }
 
-    const candidates = switch (builtin.os.tag) {
-        .macos => [_]c.AVHWDeviceType{c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX},
-        .windows => [_]c.AVHWDeviceType{ c.AV_HWDEVICE_TYPE_D3D11VA, c.AV_HWDEVICE_TYPE_DXVA2 },
-        else => [_]c.AVHWDeviceType{},
-    };
-
-    for (candidates) |device_type| {
-        const hw_pix_fmt = selectHardwarePixelFormat(codec, device_type);
-        if (hw_pix_fmt == c.AV_PIX_FMT_NONE) {
-            continue;
+    if (builtin.os.tag == .macos) {
+        if ((policy == .auto or policy == .videotoolbox) and tryEnableHardwareDevice(decoder, codec_ctx, codec, c.AV_HWDEVICE_TYPE_VIDEOTOOLBOX)) {
+            return;
         }
-
-        var hw_device_ctx: ?*c.AVBufferRef = null;
-        if (c.av_hwdevice_ctx_create(&hw_device_ctx, device_type, null, null, 0) < 0 or hw_device_ctx == null) {
-            continue;
-        }
-
-        codec_ctx.*.hw_device_ctx = c.av_buffer_ref(hw_device_ctx);
-        c.av_buffer_unref(&hw_device_ctx);
-
-        if (codec_ctx.*.hw_device_ctx == null) {
-            continue;
-        }
-
-        codec_ctx.*.@"opaque" = decoder;
-        codec_ctx.*.get_format = decoderGetFormat;
-        decoder.hw_pix_fmt = hw_pix_fmt;
-        decoder.hw_device_type = device_type;
-        decoder.hw_enabled = 1;
         return;
     }
+
+    if (builtin.os.tag == .windows) {
+        if (policy == .auto or policy == .d3d11va) {
+            if (tryEnableHardwareDevice(decoder, codec_ctx, codec, c.AV_HWDEVICE_TYPE_D3D11VA)) {
+                return;
+            }
+        }
+
+        if (policy == .auto or policy == .dxva2) {
+            _ = tryEnableHardwareDevice(decoder, codec_ctx, codec, c.AV_HWDEVICE_TYPE_DXVA2);
+        }
+    }
+}
+
+fn tryEnableHardwareDevice(
+    decoder: *c.VideoDecoder,
+    codec_ctx: *c.AVCodecContext,
+    codec: ?*const c.AVCodec,
+    device_type: c.AVHWDeviceType,
+) bool {
+    const hw_pix_fmt = selectHardwarePixelFormat(codec, device_type);
+    if (hw_pix_fmt == c.AV_PIX_FMT_NONE) {
+        return false;
+    }
+
+    var hw_device_ctx: ?*c.AVBufferRef = null;
+    if (c.av_hwdevice_ctx_create(&hw_device_ctx, device_type, null, null, 0) < 0 or hw_device_ctx == null) {
+        return false;
+    }
+
+    codec_ctx.*.hw_device_ctx = c.av_buffer_ref(hw_device_ctx);
+    c.av_buffer_unref(&hw_device_ctx);
+
+    if (codec_ctx.*.hw_device_ctx == null) {
+        return false;
+    }
+
+    codec_ctx.*.@"opaque" = decoder;
+    codec_ctx.*.get_format = decoderGetFormat;
+    decoder.hw_pix_fmt = hw_pix_fmt;
+    decoder.hw_device_type = device_type;
+    decoder.hw_enabled = 1;
+    return true;
 }
 
 fn ensureRgbaBuffer(decoder: *c.VideoDecoder, width: c_int, height: c_int) c_int {
@@ -350,8 +413,8 @@ pub export fn video_decoder_init(dec: ?*c.VideoDecoder, stream: ?*c.AVStream) c_
 
     if (hwDecodeDebugEnabled()) {
         std.debug.print(
-            "video_decoder_init: hw_enabled={} backend={s} hw_pix_fmt={} codec_id={}\n",
-            .{ d.hw_enabled, hwDeviceLabel(d.hw_device_type), @as(c_int, d.hw_pix_fmt), @as(c_uint, d.codec_ctx.*.codec_id) },
+            "video_decoder_init: hw_enabled={} policy={s} backend={s} hw_pix_fmt={} codec_id={}\n",
+            .{ d.hw_enabled, hwPolicyLabel(hwDecodePolicyFromEnvironment()), hwDeviceLabel(d.hw_device_type), @as(c_int, d.hw_pix_fmt), @as(c_uint, d.codec_ctx.*.codec_id) },
         );
     }
 
@@ -658,4 +721,15 @@ test "video_decoder true path maps videotoolbox source metadata to nv12" {
 test "video_decoder maps windows hardware metadata to nv12" {
     try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_NV12), decodeFormatTag(c.AV_PIX_FMT_D3D11));
     try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_NV12), decodeFormatTag(c.AV_PIX_FMT_DXVA2_VLD));
+}
+
+test "parseHwDecodePolicy handles supported values" {
+    try std.testing.expectEqual(HwDecodePolicy.auto, parseHwDecodePolicy("auto"));
+    try std.testing.expectEqual(HwDecodePolicy.off, parseHwDecodePolicy("off"));
+    try std.testing.expectEqual(HwDecodePolicy.off, parseHwDecodePolicy("0"));
+    try std.testing.expectEqual(HwDecodePolicy.d3d11va, parseHwDecodePolicy("d3d11va"));
+    try std.testing.expectEqual(HwDecodePolicy.d3d11va, parseHwDecodePolicy("d3d11"));
+    try std.testing.expectEqual(HwDecodePolicy.dxva2, parseHwDecodePolicy("dxva2"));
+    try std.testing.expectEqual(HwDecodePolicy.videotoolbox, parseHwDecodePolicy("videotoolbox"));
+    try std.testing.expectEqual(HwDecodePolicy.auto, parseHwDecodePolicy("unknown"));
 }

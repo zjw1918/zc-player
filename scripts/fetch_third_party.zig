@@ -4,6 +4,7 @@ const std = @import("std");
 const github_accept_header = "Accept: application/vnd.github+json";
 const github_user_agent_header = "User-Agent: zc-player-bootstrap";
 const sdl_release_api = "https://api.github.com/repos/libsdl-org/SDL/releases";
+const ffmpeg_release_api = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases";
 const imgui_repo = "https://github.com/ocornut/imgui.git";
 
 pub const Target = enum {
@@ -26,6 +27,7 @@ const Config = struct {
     third_party_dir: []const u8 = "third_party",
     skip_imgui: bool = false,
     skip_sdl3: bool = false,
+    skip_ffmpeg: bool = false,
     force: bool = false,
     help: bool = false,
 };
@@ -77,6 +79,10 @@ pub fn main() !void {
         try fetchSdl3(allocator, config);
     }
 
+    if (!config.skip_ffmpeg) {
+        try fetchFfmpeg(allocator, config);
+    }
+
     std.debug.print("Bootstrap complete.\n", .{});
 }
 
@@ -96,6 +102,10 @@ fn parseArgs(args: []const []const u8) !Config {
         }
         if (std.mem.eql(u8, arg, "--skip-sdl3")) {
             config.skip_sdl3 = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--skip-ffmpeg")) {
+            config.skip_ffmpeg = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--force")) {
@@ -197,6 +207,56 @@ fn selectReleaseAssetByTarget(assets: []const ReleaseAsset, target: Target) ?Rel
     return null;
 }
 
+fn ffmpegTargetAssetMatches(name: []const u8, target: Target) bool {
+    return switch (target) {
+        .host => false,
+        .windows_x64 => std.mem.startsWith(u8, name, "ffmpeg-") and
+            std.mem.indexOf(u8, name, "-win64-gpl-shared") != null and
+            std.mem.endsWith(u8, name, ".zip"),
+        .windows_x86 => false,
+        .windows_arm64 => std.mem.startsWith(u8, name, "ffmpeg-") and
+            std.mem.indexOf(u8, name, "-winarm64-gpl-shared") != null and
+            std.mem.endsWith(u8, name, ".zip"),
+        .macos => false,
+        .linux_src => false,
+    };
+}
+
+fn ffmpegAssetRank(name: []const u8) i32 {
+    if (std.mem.startsWith(u8, name, "ffmpeg-n8.")) return 300;
+    if (std.mem.startsWith(u8, name, "ffmpeg-n7.")) return 200;
+    if (std.mem.indexOf(u8, name, "master") != null) return 100;
+    return 10;
+}
+
+fn sdl3DevelAssetMatches(name: []const u8, target: Target) bool {
+    return switch (target) {
+        .host => false,
+        .windows_x64 => std.mem.startsWith(u8, name, "SDL3-") and std.mem.endsWith(u8, name, "-mingw.zip"),
+        .windows_x86 => false,
+        .windows_arm64 => false,
+        .macos => false,
+        .linux_src => false,
+    };
+}
+
+fn selectFfmpegAssetByTarget(assets: []const ReleaseAsset, target: Target) ?ReleaseAsset {
+    var selected: ?ReleaseAsset = null;
+    var best_rank: i32 = -1;
+
+    for (assets) |asset| {
+        if (ffmpegTargetAssetMatches(asset.name, target)) {
+            const rank = ffmpegAssetRank(asset.name);
+            if (rank > best_rank) {
+                selected = asset;
+                best_rank = rank;
+            }
+        }
+    }
+
+    return selected;
+}
+
 fn pathExists(path: []const u8) !bool {
     std.fs.cwd().access(path, .{}) catch |err| switch (err) {
         error.FileNotFound => return false,
@@ -275,6 +335,143 @@ fn fetchSdl3(allocator: std.mem.Allocator, config: Config) !void {
     });
 
     std.debug.print("Saved SDL3 artifact to {s}.\n", .{output_path});
+
+    try extractArchiveForTarget(allocator, output_path, out_dir, target);
+
+    try fetchSdl3Devel(allocator, config, target, out_dir);
+}
+
+fn fetchSdl3Devel(allocator: std.mem.Allocator, config: Config, target: Target, out_dir: []const u8) !void {
+    const release_json = try fetchReleaseJson(allocator, config.version);
+    defer allocator.free(release_json);
+
+    var parsed = try std.json.parseFromSlice(ReleaseResponse, allocator, release_json, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    const selected = for (parsed.value.assets) |asset| {
+        if (sdl3DevelAssetMatches(asset.name, target)) break asset;
+    } else return;
+
+    const devel_asset_name = try allocator.dupe(u8, selected.name);
+    defer allocator.free(devel_asset_name);
+    const devel_asset_url = try allocator.dupe(u8, selected.browser_download_url);
+    defer allocator.free(devel_asset_url);
+
+    const output_path = try std.fs.path.join(allocator, &.{ out_dir, devel_asset_name });
+    defer allocator.free(output_path);
+
+    if (!config.force and try pathExists(output_path)) {
+        std.debug.print("SDL3 devel artifact already present at {s}.\n", .{output_path});
+        return;
+    }
+
+    std.debug.print("Downloading SDL3 devel asset {s}...\n", .{devel_asset_name});
+    try runCommandNoCapture(allocator, &.{
+        "curl",
+        "-fL",
+        "--retry",
+        "3",
+        "--retry-delay",
+        "1",
+        "-H",
+        github_accept_header,
+        "-H",
+        github_user_agent_header,
+        "-o",
+        output_path,
+        devel_asset_url,
+    });
+
+    std.debug.print("Saved SDL3 devel artifact to {s}.\n", .{output_path});
+    try extractZip(allocator, output_path, out_dir);
+}
+
+fn fetchFfmpeg(allocator: std.mem.Allocator, config: Config) !void {
+    const target = switch (config.target) {
+        .host => try resolveHostTarget(builtin.os.tag, builtin.cpu.arch),
+        else => config.target,
+    };
+
+    const release_json = try fetchFfmpegReleaseJson(allocator, config.version);
+    defer allocator.free(release_json);
+
+    var release = parseFfmpegReleaseForTarget(allocator, release_json, target) catch |err| switch (err) {
+        error.AssetNotFound => {
+            std.debug.print("No FFmpeg asset available for target {s}; skipping.\n", .{@tagName(target)});
+            return;
+        },
+        else => return err,
+    };
+    defer release.deinit(allocator);
+
+    const out_dir = try std.fs.path.join(allocator, &.{ config.third_party_dir, "ffmpeg", release.version });
+    defer allocator.free(out_dir);
+    try std.fs.cwd().makePath(out_dir);
+
+    const output_path = try std.fs.path.join(allocator, &.{ out_dir, release.asset_name });
+    defer allocator.free(output_path);
+
+    if (!config.force and try pathExists(output_path)) {
+        std.debug.print("FFmpeg artifact already present at {s} (use --force to redownload).\n", .{output_path});
+        return;
+    }
+
+    std.debug.print("Downloading FFmpeg {s} asset {s}...\n", .{ release.version, release.asset_name });
+    try runCommandNoCapture(allocator, &.{
+        "curl",
+        "-fL",
+        "--retry",
+        "3",
+        "--retry-delay",
+        "1",
+        "-H",
+        github_accept_header,
+        "-H",
+        github_user_agent_header,
+        "-o",
+        output_path,
+        release.asset_url,
+    });
+
+    std.debug.print("Saved FFmpeg artifact to {s}.\n", .{output_path});
+
+    try extractArchiveForTarget(allocator, output_path, out_dir, target);
+}
+
+fn extractZip(allocator: std.mem.Allocator, archive_path: []const u8, out_dir: []const u8) !void {
+    std.debug.print("Extracting {s} to {s}...\n", .{ archive_path, out_dir });
+
+    switch (builtin.os.tag) {
+        .windows => try runCommandNoCapture(allocator, &.{ "powershell", "-Command", "Expand-Archive", "-Path", archive_path, "-DestinationPath", out_dir, "-Force" }),
+        else => try runCommandNoCapture(allocator, &.{ "unzip", "-oq", archive_path, "-d", out_dir }),
+    }
+
+    std.debug.print("Extraction complete.\n", .{});
+}
+
+fn extractTarXz(allocator: std.mem.Allocator, archive_path: []const u8, out_dir: []const u8) !void {
+    std.debug.print("Extracting {s} to {s}...\n", .{ archive_path, out_dir });
+    try runCommandNoCapture(allocator, &.{ "tar", "-xf", archive_path, "-C", out_dir });
+    std.debug.print("Extraction complete.\n", .{});
+}
+
+fn extractArchiveForTarget(allocator: std.mem.Allocator, archive_path: []const u8, out_dir: []const u8, target: Target) !void {
+    if (std.mem.endsWith(u8, archive_path, ".zip")) {
+        try extractZip(allocator, archive_path, out_dir);
+        return;
+    }
+
+    if (std.mem.endsWith(u8, archive_path, ".tar.gz") or std.mem.endsWith(u8, archive_path, ".tar.xz")) {
+        try extractTarXz(allocator, archive_path, out_dir);
+        return;
+    }
+
+    if (std.mem.endsWith(u8, archive_path, ".dmg") and target == .macos) {
+        std.debug.print("Downloaded DMG at {s}. Please install/mount manually on macOS.\n", .{archive_path});
+        return;
+    }
+
+    return error.UnsupportedArchiveType;
 }
 
 fn parseReleaseForTarget(allocator: std.mem.Allocator, release_json: []const u8, target: Target) !ParsedRelease {
@@ -316,6 +513,33 @@ fn fetchReleaseJson(allocator: std.mem.Allocator, version: []const u8) ![]u8 {
     };
 }
 
+fn fetchFfmpegReleaseJson(allocator: std.mem.Allocator, version: []const u8) ![]u8 {
+    if (std.mem.eql(u8, version, "latest")) {
+        const url = ffmpeg_release_api ++ "/latest";
+        return curlGet(allocator, url);
+    }
+
+    const prefixed_url = try std.fmt.allocPrint(allocator, "{s}/tags/{s}", .{ ffmpeg_release_api, version });
+    defer allocator.free(prefixed_url);
+
+    return curlGet(allocator, prefixed_url) catch |err| switch (err) {
+        error.CommandFailed => error.ReleaseNotFound,
+        else => err,
+    };
+}
+
+fn parseFfmpegReleaseForTarget(allocator: std.mem.Allocator, release_json: []const u8, target: Target) !ParsedRelease {
+    var parsed = try std.json.parseFromSlice(ReleaseResponse, allocator, release_json, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    const selected = selectFfmpegAssetByTarget(parsed.value.assets, target) orelse return error.AssetNotFound;
+    return .{
+        .version = try allocator.dupe(u8, normalizeVersionFromTag(parsed.value.tag_name)),
+        .asset_name = try allocator.dupe(u8, selected.name),
+        .asset_url = try allocator.dupe(u8, selected.browser_download_url),
+    };
+}
+
 fn runCommandNoCapture(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const result = try std.process.Child.run(.{
         .allocator = allocator,
@@ -340,6 +564,7 @@ fn runCommandNoCapture(allocator: std.mem.Allocator, argv: []const []const u8) !
 fn curlGet(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     const result = try std.process.Child.run(.{
         .allocator = allocator,
+        .max_output_bytes = 1024 * 1024 * 10,
         .argv = &.{
             "curl",
             "-fsSL",
@@ -383,6 +608,7 @@ fn printHelp() void {
         \\  --third-party-dir <path>
         \\  --skip-imgui
         \\  --skip-sdl3
+        \\  --skip-ffmpeg
         \\  --force
         \\  --help
         \\
@@ -460,4 +686,15 @@ test "parseReleaseForTarget extracts version and url" {
     try std.testing.expectEqualStrings("3.4.2", parsed.version);
     try std.testing.expectEqualStrings("SDL3-3.4.2.dmg", parsed.asset_name);
     try std.testing.expectEqualStrings("https://example.test/macos", parsed.asset_url);
+}
+
+test "selectFfmpegAssetByTarget prefers n8 over master" {
+    const assets = [_]ReleaseAsset{
+        .{ .name = "ffmpeg-master-latest-win64-gpl-shared.zip", .browser_download_url = "https://example.test/master" },
+        .{ .name = "ffmpeg-n8.0-latest-win64-gpl-shared-8.0.zip", .browser_download_url = "https://example.test/n8" },
+        .{ .name = "ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip", .browser_download_url = "https://example.test/n7" },
+    };
+
+    const selected = selectFfmpegAssetByTarget(&assets, .windows_x64) orelse return error.ExpectedFound;
+    try std.testing.expectEqualStrings("ffmpeg-n8.0-latest-win64-gpl-shared-8.0.zip", selected.name);
 }

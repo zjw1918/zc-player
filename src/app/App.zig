@@ -7,11 +7,9 @@ const VideoFallbackReason = SnapshotMod.VideoFallbackReason;
 const VideoHwBackend = SnapshotMod.VideoHwBackend;
 const VideoHwPolicy = SnapshotMod.VideoHwPolicy;
 const gui = @import("../ffi/gui.zig").c;
-const libc = @cImport({
-    @cInclude("stdlib.h");
-});
 
 const force_interop_env_name = "ZC_FORCE_INTEROP_HANDLE";
+var force_interop_env_override: ?bool = null;
 
 const UploadPath = enum {
     rgba,
@@ -91,6 +89,10 @@ fn toGuiHwPolicy(policy: VideoHwPolicy) c_int {
 }
 
 fn selectInteropSubmitPath(status: VideoBackendStatus) InteropSubmitPath {
+    if (force_interop_env_override) |enabled| {
+        return if (enabled) .interop_handle else if (status == .true_zero_copy) .true_zero_copy else .interop_handle;
+    }
+
     if (std.process.getEnvVarOwned(std.heap.page_allocator, force_interop_env_name)) |value| {
         defer std.heap.page_allocator.free(value);
         if (std.mem.eql(u8, value, "1")) {
@@ -99,24 +101,6 @@ fn selectInteropSubmitPath(status: VideoBackendStatus) InteropSubmitPath {
     } else |_| {}
 
     return if (status == .true_zero_copy) .true_zero_copy else .interop_handle;
-}
-
-fn captureForceInteropEnv() !?[]u8 {
-    return std.process.getEnvVarOwned(std.heap.page_allocator, force_interop_env_name) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => null,
-        else => return err,
-    };
-}
-
-fn restoreForceInteropEnv(previous: ?[]const u8) !void {
-    if (previous) |value| {
-        const value_z = try std.heap.page_allocator.dupeZ(u8, value);
-        defer std.heap.page_allocator.free(value_z);
-        try std.testing.expectEqual(@as(c_int, 0), libc.setenv(force_interop_env_name, value_z, 1));
-        return;
-    }
-
-    try std.testing.expectEqual(@as(c_int, 0), libc.unsetenv(force_interop_env_name));
 }
 
 fn isGpuInteropPayload(handle_token: u64) bool {
@@ -436,11 +420,8 @@ test "selectInteropSubmitPath chooses true-zero-copy when active" {
 }
 
 test "selectInteropSubmitPath forces interop when env override set" {
-    const previous = try captureForceInteropEnv();
-    defer if (previous) |value| std.heap.page_allocator.free(value);
-    defer restoreForceInteropEnv(previous) catch unreachable;
-
-    try std.testing.expectEqual(@as(c_int, 0), libc.setenv(force_interop_env_name, "1", 1));
+    force_interop_env_override = true;
+    defer force_interop_env_override = null;
 
     try std.testing.expectEqual(InteropSubmitPath.interop_handle, selectInteropSubmitPath(.true_zero_copy));
 }

@@ -111,6 +111,8 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
+    run_cmd.addPathDir(b.pathJoin(&.{ ffmpeg_base, "bin" }));
+    run_cmd.addPathDir(b.pathJoin(&.{ "third_party", "sdl3", "3.4.2", "SDL3-3.4.2", "x86_64-w64-mingw32", "bin" }));
 
     const run_step = b.step("run", "Run zc-player");
     run_step.dependOn(&run_cmd.step);
@@ -130,6 +132,8 @@ pub fn build(b: *std.Build) void {
     configureNativeDeps(b, unit_tests);
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
+    run_unit_tests.addPathDir(b.pathJoin(&.{ ffmpeg_base, "bin" }));
+    run_unit_tests.addPathDir(b.pathJoin(&.{ "third_party", "sdl3", "3.4.2", "SDL3-3.4.2", "x86_64-w64-mingw32", "bin" }));
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);

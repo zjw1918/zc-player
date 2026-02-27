@@ -1,9 +1,8 @@
 const std = @import("std");
 const SoftwareUploadBackendMod = @import("SoftwareUploadBackend.zig");
 const MacVideoToolboxBackendMod = @import("MacVideoToolboxBackend.zig");
-const libc = @cImport({
-    @cInclude("stdlib.h");
-});
+
+var force_interop_env_override: ?bool = null;
 
 pub const BackendKind = enum {
     software_upload,
@@ -152,14 +151,18 @@ pub const VideoInterop = struct {
     }
 
     pub fn diagnosticsEnabled() bool {
-        const value = std.posix.getenv("ZC_DEBUG_INTEROP");
-        if (value == null) {
+        const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ZC_DEBUG_INTEROP") catch {
             return false;
-        }
-        return value.?[0] != 0 and value.?[0] != '0';
+        };
+        defer std.heap.page_allocator.free(value);
+        return value.len != 0 and value[0] != '0';
     }
 
     fn forceInteropHandleEnabled() bool {
+        if (force_interop_env_override) |enabled| {
+            return enabled;
+        }
+
         if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZC_FORCE_INTEROP_HANDLE")) |value| {
             defer std.heap.page_allocator.free(value);
             return std.mem.eql(u8, value, "1");
@@ -273,26 +276,6 @@ pub const VideoInterop = struct {
         self.software.releaseFrame();
     }
 };
-
-const force_interop_env_name = "ZC_FORCE_INTEROP_HANDLE";
-
-fn captureForceInteropEnv() !?[]u8 {
-    return std.process.getEnvVarOwned(std.heap.page_allocator, force_interop_env_name) catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => null,
-        else => return err,
-    };
-}
-
-fn restoreForceInteropEnv(previous: ?[]const u8) !void {
-    if (previous) |value| {
-        const value_z = try std.heap.page_allocator.dupeZ(u8, value);
-        defer std.heap.page_allocator.free(value_z);
-        try std.testing.expectEqual(@as(c_int, 0), libc.setenv(force_interop_env_name, value_z, 1));
-        return;
-    }
-
-    try std.testing.expectEqual(@as(c_int, 0), libc.unsetenv(force_interop_env_name));
-}
 
 test "video interop auto mode selects available backend" {
     var interop = try VideoInterop.init(.auto);
@@ -478,11 +461,8 @@ test "true-zero-copy forced interop does not set import-failure fallback noise" 
     interop.mac_backend.host_frame.payload_kind = 1;
     interop.mac_backend.host_frame.gpu_token = 0x1;
 
-    const previous = try captureForceInteropEnv();
-    defer if (previous) |value| std.heap.page_allocator.free(value);
-    defer restoreForceInteropEnv(previous) catch unreachable;
-
-    try std.testing.expectEqual(@as(c_int, 0), libc.setenv(force_interop_env_name, "1", 1));
+    force_interop_env_override = true;
+    defer force_interop_env_override = null;
 
     try std.testing.expectEqual(RuntimeStatus.interop_handle, interop.runtimeStatus());
     interop.reportTrueZeroCopySubmitResult(false);
@@ -509,10 +489,7 @@ test "forced interop preserves real import failure reason" {
         .true_zero_copy_suppressed = false,
     };
 
-    const previous = try captureForceInteropEnv();
-    defer if (previous) |value| std.heap.page_allocator.free(value);
-    defer restoreForceInteropEnv(previous) catch unreachable;
-
-    try std.testing.expectEqual(@as(c_int, 0), libc.setenv(force_interop_env_name, "1", 1));
+    force_interop_env_override = true;
+    defer force_interop_env_override = null;
     try std.testing.expectEqual(FallbackReason.import_failure, interop.fallbackReason());
 }

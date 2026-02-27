@@ -1,6 +1,7 @@
 #include "renderer.h"
 #include "video/video_decoder.h"
 #include "renderer/apple_interop_bridge.h"
+#include "renderer/shader_embed.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,33 +18,31 @@ typedef struct {
     int mode;
 } VideoPushConstants;
 
-static VkShaderModule create_shader_module_from_file(VkDevice device, const char* filepath) {
-    FILE* f = fopen(filepath, "rb");
-    if (!f) {
-        fprintf(stderr, "Failed to open shader: %s\n", filepath);
+static VkShaderModule create_shader_module_from_bytes(VkDevice device, const uint8_t* data, size_t size, const char* debug_name) {
+    if (data == NULL || size == 0 || (size % 4) != 0) {
+        fprintf(stderr, "Invalid shader bytecode: %s\n", debug_name);
         return VK_NULL_HANDLE;
     }
 
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-
-    char* data = malloc(size);
-    fread(data, 1, size, f);
-    fclose(f);
+    uint32_t* code = malloc(size);
+    if (code == NULL) {
+        fprintf(stderr, "Failed to allocate shader bytecode buffer: %s\n", debug_name);
+        return VK_NULL_HANDLE;
+    }
+    memcpy(code, data, size);
 
     VkShaderModuleCreateInfo info = {
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = (size_t)size,
-        .pCode = (uint32_t*)data,
+        .codeSize = size,
+        .pCode = code,
     };
 
     VkShaderModule module;
     VkResult result = vkCreateShaderModule(device, &info, NULL, &module);
-    free(data);
+    free(code);
 
     if (result != VK_SUCCESS) {
-        fprintf(stderr, "Failed to create shader module: %d\n", result);
+        fprintf(stderr, "Failed to create shader module (%s): %d\n", debug_name, result);
         return VK_NULL_HANDLE;
     }
 
@@ -765,12 +764,22 @@ int renderer_init(Renderer* ren, App* app) {
     memset(ren, 0, sizeof(Renderer));
     ren->app = app;
 
-    ren->vert_module = create_shader_module_from_file(app->device, "src/shaders/video.vert.spv");
+    ren->vert_module = create_shader_module_from_bytes(
+        app->device,
+        zc_shader_video_vert_spv_ptr(),
+        zc_shader_video_vert_spv_len(),
+        "video.vert.spv"
+    );
     if (!ren->vert_module) {
         goto fail;
     }
 
-    ren->frag_module = create_shader_module_from_file(app->device, "src/shaders/video.frag.spv");
+    ren->frag_module = create_shader_module_from_bytes(
+        app->device,
+        zc_shader_video_frag_spv_ptr(),
+        zc_shader_video_frag_spv_len(),
+        "video.frag.spv"
+    );
     if (!ren->frag_module) {
         goto fail;
     }

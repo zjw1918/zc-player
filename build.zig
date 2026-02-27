@@ -89,6 +89,9 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    if (exe.rootModuleTarget().os.tag == .windows) {
+        exe.subsystem = .Windows;
+    }
     configureNativeDeps(b, exe);
     exe.step.dependOn(&vert_spv.step);
     exe.step.dependOn(&frag_spv.step);
@@ -130,6 +133,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     configureNativeDeps(b, unit_tests);
+    unit_tests.step.dependOn(&vert_spv.step);
+    unit_tests.step.dependOn(&frag_spv.step);
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
     run_unit_tests.addPathDir(b.pathJoin(&.{ ffmpeg_base, "bin" }));

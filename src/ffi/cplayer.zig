@@ -5,6 +5,7 @@ comptime {
     _ = @import("../audio/audio_output_exports.zig");
     _ = @import("../video/video_decoder_exports.zig");
     _ = @import("../audio/audio_decoder_exports.zig");
+    _ = @import("../shaders/shader_exports.zig");
 }
 
 pub const c = @cImport({

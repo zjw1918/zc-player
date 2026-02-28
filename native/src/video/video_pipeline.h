@@ -5,10 +5,11 @@
 #include <stdint.h>
 #include "player/player.h"
 
-#define VIDEO_FRAME_QUEUE_CAPACITY 8
+#define VIDEO_FRAME_QUEUE_CAPACITY 4
 
 typedef struct {
     uint8_t* planes[3];
+    size_t plane_sizes[3];
     int linesizes[3];
     int plane_count;
     int format;

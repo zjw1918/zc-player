@@ -57,6 +57,64 @@ fn decodeShouldSkipPlaneExtraction(true_zero_copy_active: c_int, source_hw: c_in
     return true_zero_copy_active != 0 and source_hw != 0 and gpu_token != 0;
 }
 
+fn requiredPlaneBytes(linesize: c_int, rows: usize) ?usize {
+    if (linesize <= 0) {
+        return null;
+    }
+
+    if (rows == 0) {
+        return 0;
+    }
+
+    return std.math.mul(usize, @as(usize, @intCast(linesize)), rows) catch null;
+}
+
+fn ensurePlaneCapacity(plane: *[*c]u8, plane_size: *usize, required_size: usize) bool {
+    if (required_size == 0) {
+        return true;
+    }
+
+    if (plane.* != null and plane_size.* >= required_size) {
+        return true;
+    }
+
+    const resized = if (plane.* == null)
+        c.malloc(required_size)
+    else
+        c.realloc(plane.*, required_size);
+
+    if (resized == null) {
+        return false;
+    }
+
+    plane.* = @ptrCast(resized);
+    plane_size.* = required_size;
+    return true;
+}
+
+fn releasePlaneBuffer(plane: *[*c]u8, plane_size: *usize) void {
+    if (plane.* != null) {
+        c.free(plane.*);
+        plane.* = null;
+    }
+    plane_size.* = 0;
+}
+
+fn releaseInactiveFramePlanes(frame: *c.VideoPipelineFrame, keep_count: c_int) void {
+    var plane_idx: c_int = keep_count;
+    while (plane_idx < 3) : (plane_idx += 1) {
+        releasePlaneBuffer(&frame.planes[@intCast(plane_idx)], &frame.plane_sizes[@intCast(plane_idx)]);
+        frame.linesizes[@intCast(plane_idx)] = 0;
+    }
+}
+
+fn releaseInactiveUploadPlanes(pipeline: *c.VideoPipeline, keep_count: c_int) void {
+    var plane_idx: c_int = keep_count;
+    while (plane_idx < 3) : (plane_idx += 1) {
+        releasePlaneBuffer(&pipeline.upload_planes[@intCast(plane_idx)], &pipeline.upload_plane_sizes[@intCast(plane_idx)]);
+    }
+}
+
 fn decodeDimensions(player: *c.Player) struct { width: c_int, height: c_int } {
     if (player.decoder.frame != null) {
         const frame = player.decoder.frame;
@@ -132,22 +190,28 @@ fn queuePushLocked(
         var plane_idx: c_int = 0;
         while (plane_idx < expected_plane_count) : (plane_idx += 1) {
             const geometry = planeGeometry(format, width, height, plane_idx) orelse return -1;
-            if (src_planes[@intCast(plane_idx)] == null or frame.planes[@intCast(plane_idx)] == null) {
+            if (src_planes[@intCast(plane_idx)] == null) {
                 return -1;
             }
 
-            if (src_linesizes[@intCast(plane_idx)] < @as(c_int, @intCast(geometry.row_bytes)) or frame.linesizes[@intCast(plane_idx)] < @as(c_int, @intCast(geometry.row_bytes))) {
+            const src_linesize = src_linesizes[@intCast(plane_idx)];
+            if (src_linesize < @as(c_int, @intCast(geometry.row_bytes))) {
                 return -1;
             }
+
+            const required_bytes = requiredPlaneBytes(@as(c_int, @intCast(geometry.row_bytes)), geometry.rows) orelse return -1;
+            if (!ensurePlaneCapacity(&frame.planes[@intCast(plane_idx)], &frame.plane_sizes[@intCast(plane_idx)], required_bytes)) {
+                return -1;
+            }
+            frame.linesizes[@intCast(plane_idx)] = @as(c_int, @intCast(geometry.row_bytes));
 
             const src_base: [*]const u8 = @ptrCast(src_planes[@intCast(plane_idx)]);
             const dst_base: [*]u8 = @ptrCast(frame.planes[@intCast(plane_idx)]);
-            const src_stride: usize = @intCast(src_linesizes[@intCast(plane_idx)]);
+            const src_stride: usize = @intCast(src_linesize);
             const dst_stride: usize = @intCast(frame.linesizes[@intCast(plane_idx)]);
-            const plane_capacity = pipeline.upload_plane_sizes[@intCast(plane_idx)];
             if (geometry.rows > 0) {
-                const required_bytes = (geometry.rows - 1) * dst_stride + geometry.row_bytes;
-                if (required_bytes > plane_capacity) {
+                const dst_required = (geometry.rows - 1) * dst_stride + geometry.row_bytes;
+                if (dst_required > frame.plane_sizes[@intCast(plane_idx)]) {
                     return -1;
                 }
             }
@@ -172,6 +236,7 @@ fn queuePushLocked(
     releaseGpuToken(&frame.gpu_token);
     frame.gpu_token = retained_gpu_token;
     frame.plane_count = if (gpu_only_frame) 0 else expected_plane_count;
+    releaseInactiveFramePlanes(frame, frame.plane_count);
     frame.width = width;
     frame.height = height;
     frame.pts = pts;
@@ -191,12 +256,16 @@ fn queuePopToUploadLocked(pipeline: *c.VideoPipeline) c_int {
     var plane_idx: c_int = 0;
     while (plane_idx < frame.plane_count) : (plane_idx += 1) {
         const geometry = planeGeometry(frame.format, frame.width, frame.height, plane_idx) orelse return -1;
-        if (frame.planes[@intCast(plane_idx)] == null or pipeline.upload_planes[@intCast(plane_idx)] == null) {
+        if (frame.planes[@intCast(plane_idx)] == null) {
             return -1;
         }
 
-        const frame_size = @as(usize, @intCast(frame.linesizes[@intCast(plane_idx)])) * geometry.rows;
-        if (pipeline.upload_plane_sizes[@intCast(plane_idx)] < frame_size) {
+        const frame_size = requiredPlaneBytes(frame.linesizes[@intCast(plane_idx)], geometry.rows) orelse return -1;
+        if (!ensurePlaneCapacity(
+            &pipeline.upload_planes[@intCast(plane_idx)],
+            &pipeline.upload_plane_sizes[@intCast(plane_idx)],
+            frame_size,
+        )) {
             return -1;
         }
 
@@ -219,6 +288,8 @@ fn queuePopToUploadLocked(pipeline: *c.VideoPipeline) c_int {
     frame.gpu_token = 0;
     pipeline.pending_pts = frame.pts;
     pipeline.have_pending_upload = 1;
+
+    releaseInactiveUploadPlanes(pipeline, frame.plane_count);
 
     pipeline.head = @mod(pipeline.head + 1, frameCapacity());
     pipeline.count -= 1;
@@ -399,43 +470,28 @@ pub export fn video_pipeline_init(pipeline: ?*c.VideoPipeline, player: ?*c.Playe
         return -1;
     }
 
-    const rgba_frame_size: usize = @as(usize, @intCast(width)) * @as(usize, @intCast(height)) * 4;
-    const y_plane_size: usize = @as(usize, @intCast(width)) * @as(usize, @intCast(height));
-    const uv_plane_size: usize = y_plane_size / 2;
-    const u_plane_size: usize = y_plane_size / 4;
-
     var i: c_int = 0;
     while (i < frameCapacity()) : (i += 1) {
         const idx: usize = @intCast(i);
-        p.frames[idx].planes[0] = @ptrCast(c.malloc(rgba_frame_size));
-        p.frames[idx].planes[1] = @ptrCast(c.malloc(uv_plane_size));
-        p.frames[idx].planes[2] = @ptrCast(c.malloc(u_plane_size));
-        if (p.frames[idx].planes[0] == null or p.frames[idx].planes[1] == null or p.frames[idx].planes[2] == null) {
-            video_pipeline_destroy(p);
-            return -1;
-        }
-
         p.frames[idx].plane_count = 1;
         p.frames[idx].format = c.VIDEO_FRAME_FORMAT_RGBA;
         p.frames[idx].width = width;
         p.frames[idx].height = height;
-        p.frames[idx].linesizes[0] = width * 4;
-        p.frames[idx].linesizes[1] = width;
-        p.frames[idx].linesizes[2] = @divTrunc(width, 2);
+        p.frames[idx].linesizes[0] = 0;
+        p.frames[idx].linesizes[1] = 0;
+        p.frames[idx].linesizes[2] = 0;
+        p.frames[idx].plane_sizes[0] = 0;
+        p.frames[idx].plane_sizes[1] = 0;
+        p.frames[idx].plane_sizes[2] = 0;
         p.frames[idx].pts = 0.0;
     }
 
-    p.upload_planes[0] = @ptrCast(c.malloc(rgba_frame_size));
-    p.upload_planes[1] = @ptrCast(c.malloc(uv_plane_size));
-    p.upload_planes[2] = @ptrCast(c.malloc(u_plane_size));
-    if (p.upload_planes[0] == null or p.upload_planes[1] == null or p.upload_planes[2] == null) {
-        video_pipeline_destroy(p);
-        return -1;
-    }
-
-    p.upload_plane_sizes[0] = rgba_frame_size;
-    p.upload_plane_sizes[1] = uv_plane_size;
-    p.upload_plane_sizes[2] = u_plane_size;
+    p.upload_planes[0] = null;
+    p.upload_planes[1] = null;
+    p.upload_planes[2] = null;
+    p.upload_plane_sizes[0] = 0;
+    p.upload_plane_sizes[1] = 0;
+    p.upload_plane_sizes[2] = 0;
     p.upload_plane_count = 3;
     return 0;
 }
@@ -495,7 +551,9 @@ pub export fn video_pipeline_reset(pipeline: ?*c.VideoPipeline) void {
     var i: c_int = 0;
     while (i < frameCapacity()) : (i += 1) {
         releaseGpuToken(&p.frames[@intCast(i)].gpu_token);
+        releaseInactiveFramePlanes(&p.frames[@intCast(i)], 0);
     }
+    releaseInactiveUploadPlanes(p, 0);
     releaseGpuToken(&p.pending_gpu_token);
     releaseGpuToken(&p.delivered_gpu_token);
 
@@ -556,11 +614,7 @@ pub export fn video_pipeline_destroy(pipeline: ?*c.VideoPipeline) void {
 
     var plane_idx: c_int = 0;
     while (plane_idx < 3) : (plane_idx += 1) {
-        if (p.upload_planes[@intCast(plane_idx)] != null) {
-            c.free(p.upload_planes[@intCast(plane_idx)]);
-            p.upload_planes[@intCast(plane_idx)] = null;
-            p.upload_plane_sizes[@intCast(plane_idx)] = 0;
-        }
+        releasePlaneBuffer(&p.upload_planes[@intCast(plane_idx)], &p.upload_plane_sizes[@intCast(plane_idx)]);
     }
 
     var i: c_int = 0;
@@ -568,10 +622,7 @@ pub export fn video_pipeline_destroy(pipeline: ?*c.VideoPipeline) void {
         const idx: usize = @intCast(i);
         plane_idx = 0;
         while (plane_idx < 3) : (plane_idx += 1) {
-            if (p.frames[idx].planes[@intCast(plane_idx)] != null) {
-                c.free(p.frames[idx].planes[@intCast(plane_idx)]);
-                p.frames[idx].planes[@intCast(plane_idx)] = null;
-            }
+            releasePlaneBuffer(&p.frames[idx].planes[@intCast(plane_idx)], &p.frames[idx].plane_sizes[@intCast(plane_idx)]);
         }
         releaseGpuToken(&p.frames[idx].gpu_token);
     }
@@ -675,6 +726,7 @@ test "queuePushLocked records frame format metadata" {
     var src_linesizes: [3]c_int = .{ 8, 0, 0 };
 
     pipeline.frames[0].planes[0] = dst[0..].ptr;
+    pipeline.frames[0].plane_sizes[0] = dst.len;
     pipeline.frames[0].linesizes[0] = 8;
     pipeline.frames[0].width = 2;
     pipeline.frames[0].height = 1;
@@ -693,6 +745,7 @@ test "queuePushLocked allows decoded dimensions within preallocated capacity" {
     var src_linesizes: [3]c_int = .{ 8, 0, 0 };
 
     pipeline.frames[0].planes[0] = dst[0..].ptr;
+    pipeline.frames[0].plane_sizes[0] = dst.len;
     pipeline.frames[0].linesizes[0] = 8;
     pipeline.frames[0].width = 2;
     pipeline.frames[0].height = 2;

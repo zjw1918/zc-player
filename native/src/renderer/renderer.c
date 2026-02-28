@@ -659,6 +659,15 @@ static int acquire_upload_slot(Renderer* ren, uint32_t* out_slot_index) {
 }
 
 static void copy_plane_rows(uint8_t* dst, size_t dst_row_size, const uint8_t* src, int src_linesize, int rows) {
+    if (rows <= 0) {
+        return;
+    }
+
+    if (src_linesize == (int)dst_row_size) {
+        memcpy(dst, src, dst_row_size * (size_t)rows);
+        return;
+    }
+
     for (int y = 0; y < rows; y++) {
         memcpy(dst + ((size_t)y * dst_row_size), src + ((size_t)y * (size_t)src_linesize), dst_row_size);
     }
@@ -991,6 +1000,28 @@ void renderer_destroy(Renderer* ren) {
         vkFreeMemory(app->device, ren->vertex_memory, NULL);
         ren->vertex_memory = VK_NULL_HANDLE;
     }
+}
+
+void renderer_trim_video_resources(Renderer* ren) {
+    if (ren == NULL || ren->app == NULL || ren->app->device == VK_NULL_HANDLE) {
+        return;
+    }
+
+    if (ren->video_width == 0 || ren->video_height == 0) {
+        return;
+    }
+
+    vkDeviceWaitIdle(ren->app->device);
+    for (uint32_t i = 0; i < VIDEO_UPLOAD_SLOTS; i++) {
+        destroy_video_slot_resources(ren, &ren->video_slots[i]);
+    }
+
+    ren->active_slot = 0;
+    ren->next_slot = 0;
+    ren->has_video = 0;
+    ren->video_width = 0;
+    ren->video_height = 0;
+    ren->video_format = VIDEO_FORMAT_RGBA;
 }
 
 int renderer_recreate_for_swapchain(Renderer* ren) {

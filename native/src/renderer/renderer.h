@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include "app/app.h"
 
-#define VIDEO_UPLOAD_SLOTS 3
+#define VIDEO_UPLOAD_SLOTS 2
 
 typedef enum {
     RENDERER_INTEROP_PAYLOAD_HOST = 0,
@@ -81,6 +81,7 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
 int renderer_submit_interop_handle(Renderer* ren, uint64_t handle_token, int width, int height, int format);
 int renderer_submit_true_zero_copy_handle(Renderer* ren, uint64_t handle_token, int width, int height, int format);
 int renderer_recreate_for_swapchain(Renderer* ren);
+void renderer_trim_video_resources(Renderer* ren);
 void renderer_render(Renderer* ren);
 
 #endif

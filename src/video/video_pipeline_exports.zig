@@ -57,6 +57,25 @@ fn decodeShouldSkipPlaneExtraction(true_zero_copy_active: c_int, source_hw: c_in
     return true_zero_copy_active != 0 and source_hw != 0 and gpu_token != 0;
 }
 
+fn copyRows(dst_base: [*]u8, dst_stride: usize, src_base: [*]const u8, src_stride: usize, row_bytes: usize, rows: usize) void {
+    if (rows == 0) {
+        return;
+    }
+
+    if (dst_stride == row_bytes and src_stride == row_bytes) {
+        const copy_len = row_bytes * rows;
+        std.mem.copyForwards(u8, dst_base[0..copy_len], src_base[0..copy_len]);
+        return;
+    }
+
+    var row: usize = 0;
+    while (row < rows) : (row += 1) {
+        const dst_off = row * dst_stride;
+        const src_off = row * src_stride;
+        std.mem.copyForwards(u8, dst_base[dst_off .. dst_off + row_bytes], src_base[src_off .. src_off + row_bytes]);
+    }
+}
+
 fn requiredPlaneBytes(linesize: c_int, rows: usize) ?usize {
     if (linesize <= 0) {
         return null;
@@ -172,8 +191,8 @@ fn queuePushLocked(
     }
 
     const expected_plane_count = planeCountForFormat(format);
-    const gpu_only_frame = src_plane_count == 0 and source_hw != 0 and gpu_token != 0;
-    if (!gpu_only_frame and src_plane_count < expected_plane_count) {
+    const token_only_frame = src_plane_count == 0 and gpu_token != 0;
+    if (!token_only_frame and src_plane_count < expected_plane_count) {
         return -1;
     }
 
@@ -186,7 +205,7 @@ fn queuePushLocked(
         return -1;
     }
 
-    if (!gpu_only_frame) {
+    if (!token_only_frame) {
         var plane_idx: c_int = 0;
         while (plane_idx < expected_plane_count) : (plane_idx += 1) {
             const geometry = planeGeometry(format, width, height, plane_idx) orelse return -1;
@@ -214,18 +233,14 @@ fn queuePushLocked(
                 if (dst_required > frame.plane_sizes[@intCast(plane_idx)]) {
                     return -1;
                 }
-            }
 
-            var row: usize = 0;
-            while (row < geometry.rows) : (row += 1) {
-                const dst_off = row * dst_stride;
-                const src_off = row * src_stride;
-                std.mem.copyForwards(u8, dst_base[dst_off .. dst_off + geometry.row_bytes], src_base[src_off .. src_off + geometry.row_bytes]);
+                copyRows(dst_base, dst_stride, src_base, src_stride, geometry.row_bytes, geometry.rows);
+                continue;
             }
         }
     }
 
-    const retain_token = gpu_only_frame and gpu_token != 0;
+    const retain_token = token_only_frame and gpu_token != 0;
     const retained_gpu_token = if (retain_token) retainGpuToken(gpu_token) else 0;
     if (retain_token and retained_gpu_token == 0) {
         return -1;
@@ -235,13 +250,52 @@ fn queuePushLocked(
     frame.source_hw = source_hw;
     releaseGpuToken(&frame.gpu_token);
     frame.gpu_token = retained_gpu_token;
-    frame.plane_count = if (gpu_only_frame) 0 else expected_plane_count;
+    frame.plane_count = if (token_only_frame) 0 else expected_plane_count;
     releaseInactiveFramePlanes(frame, frame.plane_count);
     frame.width = width;
     frame.height = height;
     frame.pts = pts;
     pipeline.tail = @mod(pipeline.tail + 1, frameCapacity());
     pipeline.count += 1;
+    return 0;
+}
+
+fn materializeSoftwareFrameFromToken(pipeline: *c.VideoPipeline, frame: *const c.VideoPipelineFrame) c_int {
+    if (frame.gpu_token == 0) {
+        return -1;
+    }
+
+    const retained_frame: *c.AVFrame = @ptrFromInt(frame.gpu_token);
+    const expected_plane_count = planeCountForFormat(frame.format);
+
+    var plane_idx: c_int = 0;
+    while (plane_idx < expected_plane_count) : (plane_idx += 1) {
+        const idx: usize = @intCast(plane_idx);
+        const geometry = planeGeometry(frame.format, frame.width, frame.height, plane_idx) orelse return -1;
+        const src_ptr = retained_frame.*.data[idx];
+        const src_linesize = retained_frame.*.linesize[idx];
+        if (src_ptr == null or src_linesize <= 0) {
+            return -1;
+        }
+        if (src_linesize < @as(c_int, @intCast(geometry.row_bytes))) {
+            return -1;
+        }
+
+        const required_bytes = requiredPlaneBytes(@as(c_int, @intCast(geometry.row_bytes)), geometry.rows) orelse return -1;
+        if (!ensurePlaneCapacity(&pipeline.upload_planes[idx], &pipeline.upload_plane_sizes[idx], required_bytes)) {
+            return -1;
+        }
+
+        pipeline.pending_linesizes[idx] = @as(c_int, @intCast(geometry.row_bytes));
+        const src_base: [*]const u8 = @ptrCast(src_ptr);
+        const dst_base: [*]u8 = @ptrCast(pipeline.upload_planes[idx]);
+        const src_stride: usize = @intCast(src_linesize);
+        const dst_stride: usize = @intCast(pipeline.pending_linesizes[idx]);
+        copyRows(dst_base, dst_stride, src_base, src_stride, geometry.row_bytes, geometry.rows);
+    }
+
+    releaseInactiveUploadPlanes(pipeline, expected_plane_count);
+    pipeline.pending_plane_count = expected_plane_count;
     return 0;
 }
 
@@ -253,43 +307,55 @@ fn queuePopToUploadLocked(pipeline: *c.VideoPipeline) c_int {
     const head_idx: usize = @intCast(pipeline.head);
     const frame = &pipeline.frames[head_idx];
 
-    var plane_idx: c_int = 0;
-    while (plane_idx < frame.plane_count) : (plane_idx += 1) {
-        const geometry = planeGeometry(frame.format, frame.width, frame.height, plane_idx) orelse return -1;
-        if (frame.planes[@intCast(plane_idx)] == null) {
+    if (frame.plane_count > 0) {
+        var plane_idx: c_int = 0;
+        while (plane_idx < frame.plane_count) : (plane_idx += 1) {
+            const geometry = planeGeometry(frame.format, frame.width, frame.height, plane_idx) orelse return -1;
+            if (frame.planes[@intCast(plane_idx)] == null) {
+                return -1;
+            }
+
+            const frame_size = requiredPlaneBytes(frame.linesizes[@intCast(plane_idx)], geometry.rows) orelse return -1;
+            if (!ensurePlaneCapacity(
+                &pipeline.upload_planes[@intCast(plane_idx)],
+                &pipeline.upload_plane_sizes[@intCast(plane_idx)],
+                frame_size,
+            )) {
+                return -1;
+            }
+
+            const old_upload = pipeline.upload_planes[@intCast(plane_idx)];
+            pipeline.upload_planes[@intCast(plane_idx)] = frame.planes[@intCast(plane_idx)];
+            frame.planes[@intCast(plane_idx)] = old_upload;
+        }
+        releaseInactiveUploadPlanes(pipeline, frame.plane_count);
+    } else if (frame.source_hw == 0 and frame.gpu_token != 0) {
+        if (materializeSoftwareFrameFromToken(pipeline, frame) != 0) {
             return -1;
         }
-
-        const frame_size = requiredPlaneBytes(frame.linesizes[@intCast(plane_idx)], geometry.rows) orelse return -1;
-        if (!ensurePlaneCapacity(
-            &pipeline.upload_planes[@intCast(plane_idx)],
-            &pipeline.upload_plane_sizes[@intCast(plane_idx)],
-            frame_size,
-        )) {
-            return -1;
-        }
-
-        const old_upload = pipeline.upload_planes[@intCast(plane_idx)];
-        pipeline.upload_planes[@intCast(plane_idx)] = frame.planes[@intCast(plane_idx)];
-        frame.planes[@intCast(plane_idx)] = old_upload;
     }
 
     releaseGpuToken(&pipeline.pending_gpu_token);
 
     pipeline.pending_width = frame.width;
     pipeline.pending_height = frame.height;
-    pipeline.pending_linesizes[0] = frame.linesizes[0];
-    pipeline.pending_linesizes[1] = frame.linesizes[1];
-    pipeline.pending_linesizes[2] = frame.linesizes[2];
-    pipeline.pending_plane_count = frame.plane_count;
+    if (frame.plane_count > 0) {
+        pipeline.pending_linesizes[0] = frame.linesizes[0];
+        pipeline.pending_linesizes[1] = frame.linesizes[1];
+        pipeline.pending_linesizes[2] = frame.linesizes[2];
+        pipeline.pending_plane_count = frame.plane_count;
+    } else if (!(frame.source_hw == 0 and frame.gpu_token != 0)) {
+        pipeline.pending_linesizes[0] = 0;
+        pipeline.pending_linesizes[1] = 0;
+        pipeline.pending_linesizes[2] = 0;
+        pipeline.pending_plane_count = 0;
+    }
     pipeline.pending_format = frame.format;
     pipeline.pending_source_hw = frame.source_hw;
     pipeline.pending_gpu_token = frame.gpu_token;
     frame.gpu_token = 0;
     pipeline.pending_pts = frame.pts;
     pipeline.have_pending_upload = 1;
-
-    releaseInactiveUploadPlanes(pipeline, frame.plane_count);
 
     pipeline.head = @mod(pipeline.head + 1, frameCapacity());
     pipeline.count -= 1;
@@ -385,10 +451,17 @@ fn decodeThreadMain(userdata: ?*anyopaque) callconv(.c) c_int {
         blk: {
             const format = c.player_get_video_format(pipeline.player);
             const source_hw = c.player_is_video_hw_enabled(pipeline.player);
-            const gpu_token = c.player_get_video_hw_frame_token(pipeline.player);
-            const gpu_only_frame = decodeShouldSkipPlaneExtraction(true_zero_copy_active, source_hw, gpu_token);
+            const hw_gpu_token = c.player_get_video_hw_frame_token(pipeline.player);
+            const gpu_only_frame = decodeShouldSkipPlaneExtraction(true_zero_copy_active, source_hw, hw_gpu_token);
+            var frame_token: u64 = if (gpu_only_frame) hw_gpu_token else 0;
+            var token_only_frame = gpu_only_frame;
 
-            if (!gpu_only_frame) {
+            if (!token_only_frame and source_hw == 0 and format != c.VIDEO_FRAME_FORMAT_RGBA and pipeline.player.*.decoder.frame != null) {
+                frame_token = @intFromPtr(pipeline.player.*.decoder.frame.?);
+                token_only_frame = frame_token != 0;
+            }
+
+            if (!token_only_frame) {
                 const expected_plane_count = planeCountForFormat(format);
                 if (expected_plane_count > 1) {
                     if (c.player_get_video_planes(pipeline.player, &planes, &linesizes, &plane_count) != 0) {
@@ -415,7 +488,7 @@ fn decodeThreadMain(userdata: ?*anyopaque) callconv(.c) c_int {
                 }
 
                 const adjusted_pts = pts - pipeline.pts_offset;
-                if (queuePushLocked(pipeline, &planes, &linesizes, plane_count, dimensions.width, dimensions.height, format, source_hw, gpu_token, adjusted_pts) == 0) {
+                if (queuePushLocked(pipeline, &planes, &linesizes, plane_count, dimensions.width, dimensions.height, format, source_hw, frame_token, adjusted_pts) == 0) {
                     queued = true;
                 }
                 running = pipeline.decode_running;

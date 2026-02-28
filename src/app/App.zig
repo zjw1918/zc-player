@@ -19,6 +19,8 @@ const InteropSubmitPath = enum {
     true_zero_copy,
 };
 
+const video_trim_idle_frames = 120;
+
 fn selectUploadPath(format: c_int, plane_count: c_int) UploadPath {
     if (format == gui.VIDEO_FRAME_FORMAT_NV12 and plane_count >= 2) {
         return .nv12;
@@ -187,6 +189,7 @@ pub const App = struct {
             .seek_changed = 0,
             .seek_value = 0.0,
         };
+        var non_playing_frame_count: usize = 0;
 
         while (app.running != 0) {
             _ = gui.app_poll_events(&app);
@@ -239,6 +242,7 @@ pub const App = struct {
             self.engine.setTrueZeroCopyActive(false);
 
             if (snapshot.state == .playing) {
+                non_playing_frame_count = 0;
                 if (self.engine.getFrameForRender(snapshot.current_time)) |frame| {
                     switch (frame) {
                         .software => |sw| {
@@ -310,6 +314,12 @@ pub const App = struct {
                             }
                         },
                     }
+                }
+            } else {
+                non_playing_frame_count += 1;
+                if ((snapshot.state == .stopped or !snapshot.has_media) and non_playing_frame_count >= video_trim_idle_frames) {
+                    gui.renderer_trim_video_resources(&renderer);
+                    non_playing_frame_count = 0;
                 }
             }
 

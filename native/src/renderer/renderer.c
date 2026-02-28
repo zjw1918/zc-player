@@ -97,7 +97,7 @@ static int create_buffer(App* app, VkDeviceSize size, VkBufferUsageFlags usage, 
     return 0;
 }
 
-static int create_video_plane_resources(App* app, int width, int height, VkFormat format, VkImage* image, VkDeviceMemory* image_memory, VkImageView* image_view, VkBuffer* staging_buffer, VkDeviceMemory* staging_memory, uint8_t** staging_mapped) {
+static int create_staging_plane_resources(App* app, int width, int height, VkFormat format, VkBuffer* staging_buffer, VkDeviceMemory* staging_memory, uint8_t** staging_mapped) {
     VkDeviceSize data_size = (VkDeviceSize)(size_t)width * (VkDeviceSize)(size_t)height;
     if (format == VK_FORMAT_R8G8B8A8_UNORM) {
         data_size *= 4;
@@ -114,6 +114,14 @@ static int create_video_plane_resources(App* app, int width, int height, VkForma
         return -1;
     }
     *staging_mapped = (uint8_t*)mapped;
+
+    return 0;
+}
+
+static int create_video_plane_resources(App* app, int width, int height, VkFormat format, VkImage* image, VkDeviceMemory* image_memory, VkImageView* image_view, VkBuffer* staging_buffer, VkDeviceMemory* staging_memory, uint8_t** staging_mapped) {
+    if (create_staging_plane_resources(app, width, height, format, staging_buffer, staging_memory, staging_mapped) != 0) {
+        return -1;
+    }
 
     VkImageCreateInfo image_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -174,11 +182,14 @@ static int create_video_plane_resources(App* app, int width, int height, VkForma
 }
 
 static void update_slot_descriptor(Renderer* ren, RendererVideoSlot* slot) {
-    VkImageView rgba_view = slot->image_view;
-    VkImageView y_view = slot->image_view;
-    VkImageView uv_or_u_view = slot->uv_image_view ? slot->uv_image_view : slot->image_view;
-    VkImageView v_view = slot->v_image_view ? slot->v_image_view : uv_or_u_view;
-    VkImageLayout sampled_layout = slot->imported_external ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    RendererVideoSlot* shared_slot = &ren->video_slots[0];
+    RendererVideoSlot* descriptor_source = slot->imported_external ? slot : shared_slot;
+
+    VkImageView rgba_view = descriptor_source->image_view;
+    VkImageView y_view = descriptor_source->image_view;
+    VkImageView uv_or_u_view = descriptor_source->uv_image_view ? descriptor_source->uv_image_view : descriptor_source->image_view;
+    VkImageView v_view = descriptor_source->v_image_view ? descriptor_source->v_image_view : uv_or_u_view;
+    VkImageLayout sampled_layout = descriptor_source->imported_external ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
     VkDescriptorImageInfo image_infos[4] = {
         {
@@ -557,6 +568,18 @@ static int create_video_slot_resources(Renderer* ren, RendererVideoSlot* slot, i
     return 0;
 }
 
+static int create_video_slot_staging_only(Renderer* ren, RendererVideoSlot* slot, int width, int height) {
+    if (create_staging_plane_resources(ren->app, width, height, VK_FORMAT_R8G8B8A8_UNORM, &slot->staging_buffer, &slot->staging_memory, &slot->staging_mapped) != 0) {
+        destroy_video_slot_resources(ren, slot);
+        return -1;
+    }
+
+    slot->yuv_initialized = 0;
+    slot->image_initialized = 0;
+    slot->imported_external = 0;
+    return 0;
+}
+
 static int create_video_slot_resources_nv12(Renderer* ren, RendererVideoSlot* slot, int width, int height) {
     int chroma_width = (width + 1) / 2;
     int chroma_height = (height + 1) / 2;
@@ -571,6 +594,25 @@ static int create_video_slot_resources_nv12(Renderer* ren, RendererVideoSlot* sl
     }
 
     update_slot_descriptor(ren, slot);
+
+    slot->yuv_initialized = 1;
+    slot->image_initialized = 0;
+    slot->imported_external = 0;
+    return 0;
+}
+
+static int create_video_slot_staging_only_nv12(Renderer* ren, RendererVideoSlot* slot, int width, int height) {
+    int chroma_width = (width + 1) / 2;
+    int chroma_height = (height + 1) / 2;
+
+    if (create_staging_plane_resources(ren->app, width, height, VK_FORMAT_R8_UNORM, &slot->staging_buffer, &slot->staging_memory, &slot->staging_mapped) != 0) {
+        destroy_video_slot_resources(ren, slot);
+        return -1;
+    }
+    if (create_staging_plane_resources(ren->app, chroma_width, chroma_height, VK_FORMAT_R8G8_UNORM, &slot->uv_staging_buffer, &slot->uv_staging_memory, &slot->uv_staging_mapped) != 0) {
+        destroy_video_slot_resources(ren, slot);
+        return -1;
+    }
 
     slot->yuv_initialized = 1;
     slot->image_initialized = 0;
@@ -603,6 +645,29 @@ static int create_video_slot_resources_yuv420p(Renderer* ren, RendererVideoSlot*
     return 0;
 }
 
+static int create_video_slot_staging_only_yuv420p(Renderer* ren, RendererVideoSlot* slot, int width, int height) {
+    int chroma_width = (width + 1) / 2;
+    int chroma_height = (height + 1) / 2;
+
+    if (create_staging_plane_resources(ren->app, width, height, VK_FORMAT_R8_UNORM, &slot->staging_buffer, &slot->staging_memory, &slot->staging_mapped) != 0) {
+        destroy_video_slot_resources(ren, slot);
+        return -1;
+    }
+    if (create_staging_plane_resources(ren->app, chroma_width, chroma_height, VK_FORMAT_R8_UNORM, &slot->uv_staging_buffer, &slot->uv_staging_memory, &slot->uv_staging_mapped) != 0) {
+        destroy_video_slot_resources(ren, slot);
+        return -1;
+    }
+    if (create_staging_plane_resources(ren->app, chroma_width, chroma_height, VK_FORMAT_R8_UNORM, &slot->v_staging_buffer, &slot->v_staging_memory, &slot->v_staging_mapped) != 0) {
+        destroy_video_slot_resources(ren, slot);
+        return -1;
+    }
+
+    slot->yuv_initialized = 1;
+    slot->image_initialized = 0;
+    slot->imported_external = 0;
+    return 0;
+}
+
 static int recreate_video_resources(Renderer* ren, int width, int height, int video_format) {
     for (uint32_t i = 0; i < VIDEO_UPLOAD_SLOTS; i++) {
         destroy_video_slot_resources(ren, &ren->video_slots[i]);
@@ -610,22 +675,33 @@ static int recreate_video_resources(Renderer* ren, int width, int height, int vi
 
     for (uint32_t i = 0; i < VIDEO_UPLOAD_SLOTS; i++) {
         int result = -1;
+        const int is_shared_image_slot = (i == 0);
         if (video_format == VIDEO_FORMAT_RGBA) {
-            result = create_video_slot_resources(ren, &ren->video_slots[i], width, height);
+            result = is_shared_image_slot
+                ? create_video_slot_resources(ren, &ren->video_slots[i], width, height)
+                : create_video_slot_staging_only(ren, &ren->video_slots[i], width, height);
         } else if (video_format == VIDEO_FORMAT_NV12) {
-            result = create_video_slot_resources_nv12(ren, &ren->video_slots[i], width, height);
+            result = is_shared_image_slot
+                ? create_video_slot_resources_nv12(ren, &ren->video_slots[i], width, height)
+                : create_video_slot_staging_only_nv12(ren, &ren->video_slots[i], width, height);
         } else if (video_format == VIDEO_FORMAT_YUV420P) {
-            result = create_video_slot_resources_yuv420p(ren, &ren->video_slots[i], width, height);
+            result = is_shared_image_slot
+                ? create_video_slot_resources_yuv420p(ren, &ren->video_slots[i], width, height)
+                : create_video_slot_staging_only_yuv420p(ren, &ren->video_slots[i], width, height);
         }
 
         if (result != 0) {
             return -1;
         }
+
+        update_slot_descriptor(ren, &ren->video_slots[i]);
     }
 
     ren->video_width = width;
     ren->video_height = height;
     ren->video_format = video_format;
+    ren->video_image_initialized = 0;
+    ren->video_yuv_initialized = (video_format == VIDEO_FORMAT_RGBA) ? 0 : 1;
     ren->active_slot = 0;
     ren->next_slot = 0;
     ren->has_video = 0;
@@ -939,6 +1015,8 @@ int renderer_init(Renderer* ren, App* app) {
     ren->video_width = 0;
     ren->video_height = 0;
     ren->video_format = VIDEO_FORMAT_RGBA;
+    ren->video_image_initialized = 0;
+    ren->video_yuv_initialized = 0;
     return 0;
 
 fail:
@@ -1022,6 +1100,8 @@ void renderer_trim_video_resources(Renderer* ren) {
     ren->video_width = 0;
     ren->video_height = 0;
     ren->video_format = VIDEO_FORMAT_RGBA;
+    ren->video_image_initialized = 0;
+    ren->video_yuv_initialized = 0;
 }
 
 int renderer_recreate_for_swapchain(Renderer* ren) {
@@ -1062,6 +1142,7 @@ int renderer_upload_video(Renderer* ren, uint8_t* data, int width, int height, i
     }
 
     RendererVideoSlot* slot = &ren->video_slots[slot_index];
+    RendererVideoSlot* image_slot = &ren->video_slots[0];
 
     if (slot->staging_mapped == NULL) {
         return -1;
@@ -1082,11 +1163,11 @@ int renderer_upload_video(Renderer* ren, uint8_t* data, int width, int height, i
 
     VkImageMemoryBarrier pre_barrier = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        .oldLayout = slot->image_initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+        .oldLayout = ren->video_image_initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
         .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = slot->image,
+        .image = image_slot->image,
         .subresourceRange = {
             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
             .baseMipLevel = 0,
@@ -1094,10 +1175,10 @@ int renderer_upload_video(Renderer* ren, uint8_t* data, int width, int height, i
             .baseArrayLayer = 0,
             .layerCount = 1,
         },
-        .srcAccessMask = slot->image_initialized ? VK_ACCESS_SHADER_READ_BIT : 0,
+        .srcAccessMask = ren->video_image_initialized ? VK_ACCESS_SHADER_READ_BIT : 0,
         .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
     };
-    VkPipelineStageFlags pre_src_stage = slot->image_initialized ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkPipelineStageFlags pre_src_stage = ren->video_image_initialized ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     vkCmdPipelineBarrier(slot->upload_cmd, pre_src_stage, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &pre_barrier);
 
     VkBufferImageCopy region = {
@@ -1113,7 +1194,7 @@ int renderer_upload_video(Renderer* ren, uint8_t* data, int width, int height, i
         .imageOffset = {0, 0, 0},
         .imageExtent = {(uint32_t)width, (uint32_t)height, 1},
     };
-    vkCmdCopyBufferToImage(slot->upload_cmd, slot->staging_buffer, slot->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    vkCmdCopyBufferToImage(slot->upload_cmd, slot->staging_buffer, image_slot->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
     VkImageMemoryBarrier post_barrier = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
@@ -1121,7 +1202,7 @@ int renderer_upload_video(Renderer* ren, uint8_t* data, int width, int height, i
         .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = slot->image,
+        .image = image_slot->image,
         .subresourceRange = {
             .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
             .baseMipLevel = 0,
@@ -1147,7 +1228,8 @@ int renderer_upload_video(Renderer* ren, uint8_t* data, int width, int height, i
         return -1;
     }
 
-    slot->image_initialized = 1;
+    ren->video_image_initialized = 1;
+    ren->video_yuv_initialized = 0;
     ren->active_slot = slot_index;
     ren->has_video = 1;
     return 0;
@@ -1180,6 +1262,7 @@ int renderer_upload_video_nv12(Renderer* ren, uint8_t* y_plane, int y_linesize, 
     }
 
     RendererVideoSlot* slot = &ren->video_slots[slot_index];
+    RendererVideoSlot* image_slot = &ren->video_slots[0];
 
     if (slot->staging_mapped == NULL || slot->uv_staging_mapped == NULL) {
         return -1;
@@ -1202,11 +1285,11 @@ int renderer_upload_video_nv12(Renderer* ren, uint8_t* y_plane, int y_linesize, 
     VkImageMemoryBarrier pre_barriers[2] = {
         {
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .oldLayout = slot->image_initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+            .oldLayout = ren->video_image_initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
             .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = slot->image,
+            .image = image_slot->image,
             .subresourceRange = {
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .baseMipLevel = 0,
@@ -1214,16 +1297,16 @@ int renderer_upload_video_nv12(Renderer* ren, uint8_t* y_plane, int y_linesize, 
                 .baseArrayLayer = 0,
                 .layerCount = 1,
             },
-            .srcAccessMask = slot->image_initialized ? VK_ACCESS_SHADER_READ_BIT : 0,
+            .srcAccessMask = ren->video_image_initialized ? VK_ACCESS_SHADER_READ_BIT : 0,
             .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
         },
         {
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .oldLayout = slot->image_initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+            .oldLayout = ren->video_image_initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
             .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = slot->uv_image,
+            .image = image_slot->uv_image,
             .subresourceRange = {
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .baseMipLevel = 0,
@@ -1231,11 +1314,11 @@ int renderer_upload_video_nv12(Renderer* ren, uint8_t* y_plane, int y_linesize, 
                 .baseArrayLayer = 0,
                 .layerCount = 1,
             },
-            .srcAccessMask = slot->image_initialized ? VK_ACCESS_SHADER_READ_BIT : 0,
+            .srcAccessMask = ren->video_image_initialized ? VK_ACCESS_SHADER_READ_BIT : 0,
             .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
         },
     };
-    VkPipelineStageFlags pre_src_stage = slot->image_initialized ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkPipelineStageFlags pre_src_stage = ren->video_image_initialized ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     vkCmdPipelineBarrier(slot->upload_cmd, pre_src_stage, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 2, pre_barriers);
 
     VkBufferImageCopy y_region = {
@@ -1251,7 +1334,7 @@ int renderer_upload_video_nv12(Renderer* ren, uint8_t* y_plane, int y_linesize, 
         .imageOffset = {0, 0, 0},
         .imageExtent = {(uint32_t)width, (uint32_t)height, 1},
     };
-    vkCmdCopyBufferToImage(slot->upload_cmd, slot->staging_buffer, slot->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &y_region);
+    vkCmdCopyBufferToImage(slot->upload_cmd, slot->staging_buffer, image_slot->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &y_region);
 
     VkBufferImageCopy uv_region = {
         .bufferOffset = 0,
@@ -1266,7 +1349,7 @@ int renderer_upload_video_nv12(Renderer* ren, uint8_t* y_plane, int y_linesize, 
         .imageOffset = {0, 0, 0},
         .imageExtent = {(uint32_t)chroma_width, (uint32_t)chroma_height, 1},
     };
-    vkCmdCopyBufferToImage(slot->upload_cmd, slot->uv_staging_buffer, slot->uv_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &uv_region);
+    vkCmdCopyBufferToImage(slot->upload_cmd, slot->uv_staging_buffer, image_slot->uv_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &uv_region);
 
     VkImageMemoryBarrier post_barriers[2] = {
         {
@@ -1275,7 +1358,7 @@ int renderer_upload_video_nv12(Renderer* ren, uint8_t* y_plane, int y_linesize, 
             .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = slot->image,
+            .image = image_slot->image,
             .subresourceRange = {
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .baseMipLevel = 0,
@@ -1292,7 +1375,7 @@ int renderer_upload_video_nv12(Renderer* ren, uint8_t* y_plane, int y_linesize, 
             .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = slot->uv_image,
+            .image = image_slot->uv_image,
             .subresourceRange = {
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .baseMipLevel = 0,
@@ -1319,8 +1402,8 @@ int renderer_upload_video_nv12(Renderer* ren, uint8_t* y_plane, int y_linesize, 
         return -1;
     }
 
-    slot->image_initialized = 1;
-    slot->yuv_initialized = 1;
+    ren->video_image_initialized = 1;
+    ren->video_yuv_initialized = 1;
     ren->active_slot = slot_index;
     ren->has_video = 1;
     return 0;
@@ -1354,6 +1437,7 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
     }
 
     RendererVideoSlot* slot = &ren->video_slots[slot_index];
+    RendererVideoSlot* image_slot = &ren->video_slots[0];
 
     if (slot->staging_mapped == NULL || slot->uv_staging_mapped == NULL || slot->v_staging_mapped == NULL) {
         return -1;
@@ -1377,11 +1461,11 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
     VkImageMemoryBarrier pre_barriers[3] = {
         {
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .oldLayout = slot->image_initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+            .oldLayout = ren->video_image_initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
             .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = slot->image,
+            .image = image_slot->image,
             .subresourceRange = {
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .baseMipLevel = 0,
@@ -1389,16 +1473,16 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
                 .baseArrayLayer = 0,
                 .layerCount = 1,
             },
-            .srcAccessMask = slot->image_initialized ? VK_ACCESS_SHADER_READ_BIT : 0,
+            .srcAccessMask = ren->video_image_initialized ? VK_ACCESS_SHADER_READ_BIT : 0,
             .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
         },
         {
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .oldLayout = slot->image_initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+            .oldLayout = ren->video_image_initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
             .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = slot->uv_image,
+            .image = image_slot->uv_image,
             .subresourceRange = {
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .baseMipLevel = 0,
@@ -1406,16 +1490,16 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
                 .baseArrayLayer = 0,
                 .layerCount = 1,
             },
-            .srcAccessMask = slot->image_initialized ? VK_ACCESS_SHADER_READ_BIT : 0,
+            .srcAccessMask = ren->video_image_initialized ? VK_ACCESS_SHADER_READ_BIT : 0,
             .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
         },
         {
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-            .oldLayout = slot->image_initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+            .oldLayout = ren->video_image_initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
             .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = slot->v_image,
+            .image = image_slot->v_image,
             .subresourceRange = {
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .baseMipLevel = 0,
@@ -1423,11 +1507,11 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
                 .baseArrayLayer = 0,
                 .layerCount = 1,
             },
-            .srcAccessMask = slot->image_initialized ? VK_ACCESS_SHADER_READ_BIT : 0,
+            .srcAccessMask = ren->video_image_initialized ? VK_ACCESS_SHADER_READ_BIT : 0,
             .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
         },
     };
-    VkPipelineStageFlags pre_src_stage = slot->image_initialized ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkPipelineStageFlags pre_src_stage = ren->video_image_initialized ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     vkCmdPipelineBarrier(slot->upload_cmd, pre_src_stage, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 3, pre_barriers);
 
     VkBufferImageCopy y_region = {
@@ -1443,7 +1527,7 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
         .imageOffset = {0, 0, 0},
         .imageExtent = {(uint32_t)width, (uint32_t)height, 1},
     };
-    vkCmdCopyBufferToImage(slot->upload_cmd, slot->staging_buffer, slot->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &y_region);
+    vkCmdCopyBufferToImage(slot->upload_cmd, slot->staging_buffer, image_slot->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &y_region);
 
     VkBufferImageCopy u_region = {
         .bufferOffset = 0,
@@ -1458,7 +1542,7 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
         .imageOffset = {0, 0, 0},
         .imageExtent = {(uint32_t)chroma_width, (uint32_t)chroma_height, 1},
     };
-    vkCmdCopyBufferToImage(slot->upload_cmd, slot->uv_staging_buffer, slot->uv_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &u_region);
+    vkCmdCopyBufferToImage(slot->upload_cmd, slot->uv_staging_buffer, image_slot->uv_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &u_region);
 
     VkBufferImageCopy v_region = {
         .bufferOffset = 0,
@@ -1473,7 +1557,7 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
         .imageOffset = {0, 0, 0},
         .imageExtent = {(uint32_t)chroma_width, (uint32_t)chroma_height, 1},
     };
-    vkCmdCopyBufferToImage(slot->upload_cmd, slot->v_staging_buffer, slot->v_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &v_region);
+    vkCmdCopyBufferToImage(slot->upload_cmd, slot->v_staging_buffer, image_slot->v_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &v_region);
 
     VkImageMemoryBarrier post_barriers[3] = {
         {
@@ -1482,7 +1566,7 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
             .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = slot->image,
+            .image = image_slot->image,
             .subresourceRange = {
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .baseMipLevel = 0,
@@ -1499,7 +1583,7 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
             .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = slot->uv_image,
+            .image = image_slot->uv_image,
             .subresourceRange = {
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .baseMipLevel = 0,
@@ -1516,7 +1600,7 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
             .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = slot->v_image,
+            .image = image_slot->v_image,
             .subresourceRange = {
                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                 .baseMipLevel = 0,
@@ -1543,8 +1627,8 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
         return -1;
     }
 
-    slot->image_initialized = 1;
-    slot->yuv_initialized = 1;
+    ren->video_image_initialized = 1;
+    ren->video_yuv_initialized = 1;
     ren->active_slot = slot_index;
     ren->has_video = 1;
     return 0;
@@ -1682,6 +1766,8 @@ int renderer_submit_true_zero_copy_handle(Renderer* ren, uint64_t handle_token, 
     ren->video_width = width;
     ren->video_height = height;
     ren->video_format = VIDEO_FORMAT_NV12;
+    ren->video_image_initialized = 1;
+    ren->video_yuv_initialized = 1;
     ren->active_slot = slot_index;
     ren->has_video = 1;
     return 0;
@@ -1694,7 +1780,7 @@ void renderer_render(Renderer* ren) {
     }
 
     RendererVideoSlot* slot = &ren->video_slots[ren->active_slot];
-    if (!slot->image_initialized) {
+    if (!slot->imported_external && !ren->video_image_initialized) {
         return;
     }
 

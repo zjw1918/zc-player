@@ -6,8 +6,15 @@
 
 #define MAX_FRAMES_IN_FLIGHT 2
 
+typedef enum {
+    APP_RENDER_BACKEND_VULKAN = 0,
+    APP_RENDER_BACKEND_SDL = 1,
+} AppRenderBackend;
+
 typedef struct {
     SDL_Window* window;
+    SDL_Renderer* sdl_renderer;
+    AppRenderBackend render_backend;
     VkInstance instance;
     VkSurfaceKHR surface;
     VkPhysicalDevice gpu;

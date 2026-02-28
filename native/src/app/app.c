@@ -11,6 +11,14 @@ static const char* required_validation_layers[] = {
     "VK_LAYER_KHRONOS_validation"
 };
 
+static AppRenderBackend select_render_backend(void) {
+    const char* value = getenv("ZC_RENDER_BACKEND");
+    if (value != NULL && strcmp(value, "sdl") == 0) {
+        return APP_RENDER_BACKEND_SDL;
+    }
+    return APP_RENDER_BACKEND_VULKAN;
+}
+
 static int check_validation_layer_support() {
     uint32_t layer_count;
     vkEnumerateInstanceLayerProperties(&layer_count, NULL);
@@ -755,6 +763,7 @@ static int recreate_swapchain(App* app) {
 int app_init(App* app, const char* title, int width, int height) {
     memset(app, 0, sizeof(App));
     app->graphics_queue_family = UINT32_MAX;
+    app->render_backend = select_render_backend();
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
@@ -765,7 +774,12 @@ int app_init(App* app, const char* title, int width, int height) {
     app->height = height;
     app->running = 1;
 
-    app->window = SDL_CreateWindow(title, width, height, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+    SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE;
+    if (app->render_backend == APP_RENDER_BACKEND_VULKAN) {
+        window_flags |= SDL_WINDOW_VULKAN;
+    }
+
+    app->window = SDL_CreateWindow(title, width, height, window_flags);
     if (!app->window) {
         fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         goto fail;
@@ -773,6 +787,18 @@ int app_init(App* app, const char* title, int width, int height) {
 
     SDL_ShowWindow(app->window);
     SDL_GetWindowSizeInPixels(app->window, &app->width, &app->height);
+
+    if (app->render_backend == APP_RENDER_BACKEND_SDL) {
+        app->sdl_renderer = SDL_CreateRenderer(app->window, NULL);
+        if (!app->sdl_renderer) {
+            fprintf(stderr, "SDL_CreateRenderer failed: %s\n", SDL_GetError());
+            goto fail;
+        }
+
+        app->current_frame = 0;
+        printf("SDL3 renderer window created successfully!\n");
+        return 0;
+    }
 
     if (create_instance(app) != 0) {
         fprintf(stderr, "failed to create instance!\n");
@@ -834,6 +860,19 @@ fail:
 }
 
 void app_destroy(App* app) {
+    if (app->render_backend == APP_RENDER_BACKEND_SDL) {
+        if (app->sdl_renderer) {
+            SDL_DestroyRenderer(app->sdl_renderer);
+            app->sdl_renderer = NULL;
+        }
+        if (app->window) {
+            SDL_DestroyWindow(app->window);
+            app->window = NULL;
+        }
+        SDL_Quit();
+        return;
+    }
+
     if (app->device) {
         vkDeviceWaitIdle(app->device);
     }
@@ -891,6 +930,18 @@ void app_set_swapchain_recreate_callback(App* app, void (*callback)(void*), void
 }
 
 void app_present(App* app) {
+    if (app->render_backend == APP_RENDER_BACKEND_SDL) {
+        if (app->sdl_renderer == NULL) {
+            return;
+        }
+
+        if (app->render_callback) {
+            app->render_callback(app->render_userdata);
+        }
+        SDL_RenderPresent(app->sdl_renderer);
+        return;
+    }
+
     if (app->swapchain_needs_recreate) {
         int recreate_result = recreate_swapchain(app);
         if (recreate_result != 0) {

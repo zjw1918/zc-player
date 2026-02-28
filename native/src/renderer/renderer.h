@@ -70,6 +70,7 @@ typedef struct {
     int video_width;
     int video_height;
     int video_format;
+    SDL_Texture* sdl_video_texture;
     int video_image_initialized;
     int video_yuv_initialized;
     int has_video;

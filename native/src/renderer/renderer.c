@@ -749,6 +749,52 @@ static void copy_plane_rows(uint8_t* dst, size_t dst_row_size, const uint8_t* sr
     }
 }
 
+static Uint32 sdl_pixel_format_for_video_format(int video_format) {
+    switch (video_format) {
+        case VIDEO_FORMAT_NV12:
+            return SDL_PIXELFORMAT_NV12;
+        case VIDEO_FORMAT_YUV420P:
+            return SDL_PIXELFORMAT_IYUV;
+        case VIDEO_FORMAT_RGBA:
+        default:
+            return SDL_PIXELFORMAT_RGBA32;
+    }
+}
+
+static int ensure_sdl_video_texture(Renderer* ren, int width, int height, int video_format) {
+    if (ren == NULL || ren->app == NULL || ren->app->sdl_renderer == NULL) {
+        return -1;
+    }
+
+    if (ren->sdl_video_texture != NULL && ren->video_width == width && ren->video_height == height && ren->video_format == video_format) {
+        return 0;
+    }
+
+    if (ren->sdl_video_texture != NULL) {
+        SDL_DestroyTexture(ren->sdl_video_texture);
+        ren->sdl_video_texture = NULL;
+    }
+
+    ren->sdl_video_texture = SDL_CreateTexture(
+        ren->app->sdl_renderer,
+        sdl_pixel_format_for_video_format(video_format),
+        SDL_TEXTUREACCESS_STREAMING,
+        width,
+        height
+    );
+    if (ren->sdl_video_texture == NULL) {
+        return -1;
+    }
+
+    ren->video_width = width;
+    ren->video_height = height;
+    ren->video_format = video_format;
+    ren->video_image_initialized = 1;
+    ren->video_yuv_initialized = (video_format == VIDEO_FORMAT_RGBA) ? 0 : 1;
+    ren->has_video = 0;
+    return 0;
+}
+
 static int create_graphics_pipeline(Renderer* ren) {
     App* app = ren->app;
     if (!app || !app->device || !app->render_pass || !ren->pipeline_layout || !ren->vert_module || !ren->frag_module) {
@@ -848,6 +894,19 @@ static int create_graphics_pipeline(Renderer* ren) {
 int renderer_init(Renderer* ren, App* app) {
     memset(ren, 0, sizeof(Renderer));
     ren->app = app;
+
+    if (app->render_backend == APP_RENDER_BACKEND_SDL) {
+        ren->active_slot = 0;
+        ren->next_slot = 0;
+        ren->has_video = 0;
+        ren->video_width = 0;
+        ren->video_height = 0;
+        ren->video_format = VIDEO_FORMAT_RGBA;
+        ren->video_image_initialized = 0;
+        ren->video_yuv_initialized = 0;
+        ren->sdl_video_texture = NULL;
+        return 0;
+    }
 
     ren->vert_module = create_shader_module_from_bytes(
         app->device,
@@ -1026,6 +1085,20 @@ fail:
 
 void renderer_destroy(Renderer* ren) {
     App* app = ren->app;
+    if (app != NULL && app->render_backend == APP_RENDER_BACKEND_SDL) {
+        if (ren->sdl_video_texture != NULL) {
+            SDL_DestroyTexture(ren->sdl_video_texture);
+            ren->sdl_video_texture = NULL;
+        }
+        ren->has_video = 0;
+        ren->video_width = 0;
+        ren->video_height = 0;
+        ren->video_format = VIDEO_FORMAT_RGBA;
+        ren->video_image_initialized = 0;
+        ren->video_yuv_initialized = 0;
+        return;
+    }
+
     if (app && app->device) {
         vkDeviceWaitIdle(app->device);
     }
@@ -1082,6 +1155,20 @@ void renderer_destroy(Renderer* ren) {
 
 void renderer_trim_video_resources(Renderer* ren) {
     if (ren == NULL || ren->app == NULL || ren->app->device == VK_NULL_HANDLE) {
+        if (ren != NULL && ren->app != NULL && ren->app->render_backend == APP_RENDER_BACKEND_SDL) {
+            if (ren->sdl_video_texture != NULL) {
+                SDL_DestroyTexture(ren->sdl_video_texture);
+                ren->sdl_video_texture = NULL;
+            }
+            ren->active_slot = 0;
+            ren->next_slot = 0;
+            ren->has_video = 0;
+            ren->video_width = 0;
+            ren->video_height = 0;
+            ren->video_format = VIDEO_FORMAT_RGBA;
+            ren->video_image_initialized = 0;
+            ren->video_yuv_initialized = 0;
+        }
         return;
     }
 
@@ -1106,7 +1193,14 @@ void renderer_trim_video_resources(Renderer* ren) {
 
 int renderer_recreate_for_swapchain(Renderer* ren) {
     if (!ren || !ren->app || !ren->app->device) {
+        if (ren && ren->app && ren->app->render_backend == APP_RENDER_BACKEND_SDL) {
+            return 0;
+        }
         return -1;
+    }
+
+    if (ren->app->render_backend == APP_RENDER_BACKEND_SDL) {
+        return 0;
     }
 
     if (ren->pipeline) {
@@ -1127,6 +1221,17 @@ int renderer_upload_video(Renderer* ren, uint8_t* data, int width, int height, i
     size_t row_size = (size_t)width * 4;
     if (linesize < (int)row_size) {
         return -1;
+    }
+
+    if (app->render_backend == APP_RENDER_BACKEND_SDL) {
+        if (ensure_sdl_video_texture(ren, width, height, VIDEO_FORMAT_RGBA) != 0) {
+            return -1;
+        }
+        if (!SDL_UpdateTexture(ren->sdl_video_texture, NULL, data, linesize)) {
+            return -1;
+        }
+        ren->has_video = 1;
+        return 0;
     }
 
     if (ren->video_width != width || ren->video_height != height || ren->video_format != VIDEO_FORMAT_RGBA || ren->video_slots[0].image == VK_NULL_HANDLE) {
@@ -1247,6 +1352,17 @@ int renderer_upload_video_nv12(Renderer* ren, uint8_t* y_plane, int y_linesize, 
     }
     if (y_linesize < (int)y_row_size || uv_linesize < (int)uv_row_size) {
         return -1;
+    }
+
+    if (app->render_backend == APP_RENDER_BACKEND_SDL) {
+        if (ensure_sdl_video_texture(ren, width, height, VIDEO_FORMAT_NV12) != 0) {
+            return -1;
+        }
+        if (!SDL_UpdateNVTexture(ren->sdl_video_texture, NULL, y_plane, y_linesize, uv_plane, uv_linesize)) {
+            return -1;
+        }
+        ren->has_video = 1;
+        return 0;
     }
 
     if (ren->video_width != width || ren->video_height != height || ren->video_format != VIDEO_FORMAT_NV12 || ren->video_slots[0].image == VK_NULL_HANDLE || ren->video_slots[0].uv_image == VK_NULL_HANDLE) {
@@ -1422,6 +1538,17 @@ int renderer_upload_video_yuv420p(Renderer* ren, uint8_t* y_plane, int y_linesiz
     }
     if (y_linesize < (int)y_row_size || u_linesize < (int)u_row_size || v_linesize < (int)v_row_size) {
         return -1;
+    }
+
+    if (app->render_backend == APP_RENDER_BACKEND_SDL) {
+        if (ensure_sdl_video_texture(ren, width, height, VIDEO_FORMAT_YUV420P) != 0) {
+            return -1;
+        }
+        if (!SDL_UpdateYUVTexture(ren->sdl_video_texture, NULL, y_plane, y_linesize, u_plane, u_linesize, v_plane, v_linesize)) {
+            return -1;
+        }
+        ren->has_video = 1;
+        return 0;
     }
 
     if (ren->video_width != width || ren->video_height != height || ren->video_format != VIDEO_FORMAT_YUV420P || ren->video_slots[0].image == VK_NULL_HANDLE || ren->video_slots[0].uv_image == VK_NULL_HANDLE || ren->video_slots[0].v_image == VK_NULL_HANDLE) {
@@ -1688,6 +1815,10 @@ int renderer_submit_true_zero_copy_handle(Renderer* ren, uint64_t handle_token, 
         return -1;
     }
 
+    if (ren->app != NULL && ren->app->render_backend == APP_RENDER_BACKEND_SDL) {
+        return -1;
+    }
+
     const RendererInteropHostFrame* frame = (const RendererInteropHostFrame*)(uintptr_t)handle_token;
     if (frame->payload_kind != RENDERER_INTEROP_PAYLOAD_GPU || frame->gpu_token == 0) {
         return -1;
@@ -1776,6 +1907,50 @@ int renderer_submit_true_zero_copy_handle(Renderer* ren, uint64_t handle_token, 
 
 void renderer_render(Renderer* ren) {
     if (!ren->has_video) {
+        return;
+    }
+
+    if (ren->app != NULL && ren->app->render_backend == APP_RENDER_BACKEND_SDL) {
+        if (ren->app->sdl_renderer == NULL || ren->sdl_video_texture == NULL) {
+            return;
+        }
+
+        float surface_width = (float)ren->app->width;
+        float surface_height = (float)ren->app->height;
+        float video_width = (float)ren->video_width;
+        float video_height = (float)ren->video_height;
+
+        float viewport_x = 0.0f;
+        float viewport_y = 0.0f;
+        float viewport_width = surface_width;
+        float viewport_height = surface_height;
+
+        if (surface_width > 0.0f && surface_height > 0.0f && video_width > 0.0f && video_height > 0.0f) {
+            float surface_aspect = surface_width / surface_height;
+            float video_aspect = video_width / video_height;
+
+            if (surface_aspect > video_aspect) {
+                viewport_height = surface_height;
+                viewport_width = viewport_height * video_aspect;
+                viewport_x = (surface_width - viewport_width) * 0.5f;
+                viewport_y = 0.0f;
+            } else {
+                viewport_width = surface_width;
+                viewport_height = viewport_width / video_aspect;
+                viewport_x = 0.0f;
+                viewport_y = (surface_height - viewport_height) * 0.5f;
+            }
+        }
+
+        SDL_SetRenderDrawColor(ren->app->sdl_renderer, 0, 0, 0, 255);
+        SDL_RenderClear(ren->app->sdl_renderer);
+        SDL_FRect dst = {
+            .x = viewport_x,
+            .y = viewport_y,
+            .w = viewport_width,
+            .h = viewport_height,
+        };
+        SDL_RenderTexture(ren->app->sdl_renderer, ren->sdl_video_texture, NULL, &dst);
         return;
     }
 

@@ -173,10 +173,12 @@ pub const App = struct {
         gui.app_set_render_callback(&app, renderVideoCallback, &renderer);
         gui.app_set_swapchain_recreate_callback(&app, swapchainRecreatedCallback, &renderer);
 
-        if (gui.ui_init(&app) != 0) {
+        const sdl_backend_enabled = app.render_backend == gui.APP_RENDER_BACKEND_SDL;
+
+        if (!sdl_backend_enabled and gui.ui_init(&app) != 0) {
             return error.UiInitFailed;
         }
-        defer gui.ui_shutdown();
+        defer if (!sdl_backend_enabled) gui.ui_shutdown();
 
         try self.engine.start();
         defer self.engine.stop();
@@ -198,14 +200,14 @@ pub const App = struct {
             }
 
             var selected_path: [1024]u8 = [_]u8{0} ** 1024;
-            if (gui.ui_take_selected_file(&selected_path[0], selected_path.len) != 0) {
+            if (!sdl_backend_enabled and gui.ui_take_selected_file(&selected_path[0], selected_path.len) != 0) {
                 const c_path: [*:0]const u8 = @ptrCast(&selected_path[0]);
                 const path = std.mem.span(c_path);
                 _ = self.engine.sendOpen(path) catch {};
             }
 
             var action: gui.UIAction = undefined;
-            while (gui.ui_take_action(&action) != 0) {
+            while (!sdl_backend_enabled and gui.ui_take_action(&action) != 0) {
                 switch (action.type) {
                     gui.UI_ACTION_PLAY => {
                         _ = self.engine.sendPlay() catch {};
@@ -347,8 +349,10 @@ pub const App = struct {
                 .audio_channels = snapshot.audio_channels,
             };
 
-            gui.ui_new_frame();
-            gui.ui_render(&ui_state, &ui_snapshot);
+            if (!sdl_backend_enabled) {
+                gui.ui_new_frame();
+                gui.ui_render(&ui_state, &ui_snapshot);
+            }
             gui.app_present(&app);
             gui.SDL_Delay(16);
         }

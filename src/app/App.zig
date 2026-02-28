@@ -8,9 +8,6 @@ const VideoHwBackend = SnapshotMod.VideoHwBackend;
 const VideoHwPolicy = SnapshotMod.VideoHwPolicy;
 const gui = @import("../ffi/gui.zig").c;
 
-const force_interop_env_name = "ZC_FORCE_INTEROP_HANDLE";
-var force_interop_env_override: ?bool = null;
-
 const UploadPath = enum {
     rgba,
     nv12,
@@ -89,17 +86,6 @@ fn toGuiHwPolicy(policy: VideoHwPolicy) c_int {
 }
 
 fn selectInteropSubmitPath(status: VideoBackendStatus) InteropSubmitPath {
-    if (force_interop_env_override) |enabled| {
-        return if (enabled) .interop_handle else if (status == .true_zero_copy) .true_zero_copy else .interop_handle;
-    }
-
-    if (std.process.getEnvVarOwned(std.heap.page_allocator, force_interop_env_name)) |value| {
-        defer std.heap.page_allocator.free(value);
-        if (std.mem.eql(u8, value, "1")) {
-            return .interop_handle;
-        }
-    } else |_| {}
-
     return if (status == .true_zero_copy) .true_zero_copy else .interop_handle;
 }
 
@@ -417,13 +403,6 @@ test "selectInteropSubmitPath chooses true-zero-copy when active" {
     try std.testing.expectEqual(InteropSubmitPath.true_zero_copy, selectInteropSubmitPath(.true_zero_copy));
     try std.testing.expectEqual(InteropSubmitPath.interop_handle, selectInteropSubmitPath(.interop_handle));
     try std.testing.expectEqual(InteropSubmitPath.interop_handle, selectInteropSubmitPath(.software));
-}
-
-test "selectInteropSubmitPath forces interop when env override set" {
-    force_interop_env_override = true;
-    defer force_interop_env_override = null;
-
-    try std.testing.expectEqual(InteropSubmitPath.interop_handle, selectInteropSubmitPath(.true_zero_copy));
 }
 
 test "isGpuInteropPayload detects gpu-tagged interop frames" {

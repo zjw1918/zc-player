@@ -2,8 +2,6 @@ const std = @import("std");
 const SoftwareUploadBackendMod = @import("SoftwareUploadBackend.zig");
 const MacVideoToolboxBackendMod = @import("MacVideoToolboxBackend.zig");
 
-var force_interop_env_override: ?bool = null;
-
 pub const BackendKind = enum {
     software_upload,
     macos_videotoolbox,
@@ -119,12 +117,7 @@ pub const VideoInterop = struct {
     }
 
     pub fn selectionModeFromEnvironment() SelectionMode {
-        const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ZC_VIDEO_BACKEND_MODE") catch null;
-        defer if (value) |v| std.heap.page_allocator.free(v);
-        if (value == null) {
-            return .auto;
-        }
-        return parseSelectionMode(std.mem.sliceTo(value.?, 0));
+        return .auto;
     }
 
     pub fn deinit(self: *VideoInterop) void {
@@ -158,29 +151,12 @@ pub const VideoInterop = struct {
         return value.len != 0 and value[0] != '0';
     }
 
-    fn forceInteropHandleEnabled() bool {
-        if (force_interop_env_override) |enabled| {
-            return enabled;
-        }
-
-        if (std.process.getEnvVarOwned(std.heap.page_allocator, "ZC_FORCE_INTEROP_HANDLE")) |value| {
-            defer std.heap.page_allocator.free(value);
-            return std.mem.eql(u8, value, "1");
-        } else |_| {
-            return false;
-        }
-    }
-
     pub fn runtimeStatus(self: *const VideoInterop) RuntimeStatus {
         if (self.force_zero_copy_blocked) {
             return .force_zero_copy_blocked;
         }
 
         if (self.kind == .macos_videotoolbox) {
-            if (forceInteropHandleEnabled()) {
-                return .interop_handle;
-            }
-
             if (self.force_zero_copy_blocked) {
                 return .interop_handle;
             }
@@ -199,9 +175,6 @@ pub const VideoInterop = struct {
 
     pub fn reportTrueZeroCopySubmitResult(self: *VideoInterop, success: bool) void {
         if (self.kind != .macos_videotoolbox) {
-            return;
-        }
-        if (forceInteropHandleEnabled()) {
             return;
         }
 
@@ -433,63 +406,5 @@ test "true-zero-copy submit failure suppresses true status" {
     try std.testing.expectEqual(RuntimeStatus.true_zero_copy, interop.runtimeStatus());
     interop.reportTrueZeroCopySubmitResult(false);
     try std.testing.expectEqual(RuntimeStatus.interop_handle, interop.runtimeStatus());
-    try std.testing.expectEqual(FallbackReason.import_failure, interop.fallbackReason());
-}
-
-test "true-zero-copy forced interop does not set import-failure fallback noise" {
-    var interop = VideoInterop{
-        .kind = .macos_videotoolbox,
-        .mode = .auto,
-        .software = .{},
-        .mac_backend = .{},
-        .fallback_switches = 0,
-        .consecutive_failures = 0,
-        .failure_threshold = 3,
-        .submit_success_count = 0,
-        .submit_failure_count = 0,
-        .acquire_failure_count = 0,
-        .true_submit_success_count = 0,
-        .true_submit_failure_count = 0,
-        .force_zero_copy_blocked = false,
-        .last_fallback_reason = .none,
-        .true_zero_copy_suppressed = false,
-    };
-
-    interop.mac_backend.true_zero_copy_capable = true;
-    interop.mac_backend.hw_frame_streak = 12;
-    interop.mac_backend.last_frame_format = 2;
-    interop.mac_backend.host_frame.payload_kind = 1;
-    interop.mac_backend.host_frame.gpu_token = 0x1;
-
-    force_interop_env_override = true;
-    defer force_interop_env_override = null;
-
-    try std.testing.expectEqual(RuntimeStatus.interop_handle, interop.runtimeStatus());
-    interop.reportTrueZeroCopySubmitResult(false);
-    try std.testing.expectEqual(RuntimeStatus.interop_handle, interop.runtimeStatus());
-    try std.testing.expectEqual(FallbackReason.none, interop.fallbackReason());
-}
-
-test "forced interop preserves real import failure reason" {
-    var interop = VideoInterop{
-        .kind = .macos_videotoolbox,
-        .mode = .auto,
-        .software = .{},
-        .mac_backend = .{},
-        .fallback_switches = 0,
-        .consecutive_failures = 0,
-        .failure_threshold = 3,
-        .submit_success_count = 0,
-        .submit_failure_count = 0,
-        .acquire_failure_count = 0,
-        .true_submit_success_count = 0,
-        .true_submit_failure_count = 0,
-        .force_zero_copy_blocked = false,
-        .last_fallback_reason = .import_failure,
-        .true_zero_copy_suppressed = false,
-    };
-
-    force_interop_env_override = true;
-    defer force_interop_env_override = null;
     try std.testing.expectEqual(FallbackReason.import_failure, interop.fallbackReason());
 }

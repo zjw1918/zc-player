@@ -1590,9 +1590,8 @@ int renderer_submit_true_zero_copy_handle(Renderer* ren, uint64_t handle_token, 
     int uv_width = 0;
     int uv_height = 0;
 
-    // Runtime verification for Task 4:
-    //   ZC_VIDEO_BACKEND_MODE=zero_copy ZC_EXPERIMENTAL_TRUE_ZERO_COPY=1 zig build run -- '/Volumes/collections/艾尔登法环/meilinna1.mp4'
-    // Expected on success: no Vulkan validation errors, no green/magenta tint, stable playback.
+    // Runtime verification: run with a hardware-decoded NV12 source and confirm
+    // no Vulkan validation errors, no green/magenta tint, and stable playback.
     int y_pixel_format = 0;
     int uv_pixel_format = 0;
     uint64_t y_texture_token = apple_interop_create_mtl_texture_from_avframe(frame->gpu_token, 0, &y_width, &y_height, &y_pixel_format);

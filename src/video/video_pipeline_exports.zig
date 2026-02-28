@@ -57,6 +57,17 @@ fn decodeShouldSkipPlaneExtraction(true_zero_copy_active: c_int, source_hw: c_in
     return true_zero_copy_active != 0 and source_hw != 0 and gpu_token != 0;
 }
 
+fn decodeDimensions(player: *c.Player) struct { width: c_int, height: c_int } {
+    if (player.decoder.frame != null) {
+        const frame = player.decoder.frame;
+        if (frame.?.*.width > 0 and frame.?.*.height > 0) {
+            return .{ .width = frame.?.*.width, .height = frame.?.*.height };
+        }
+    }
+
+    return .{ .width = player.width, .height = player.height };
+}
+
 fn releaseGpuToken(token: *u64) void {
     if (token.* == 0) {
         return;
@@ -111,7 +122,9 @@ fn queuePushLocked(
     const tail_idx: usize = @intCast(pipeline.tail);
     const frame = &pipeline.frames[tail_idx];
 
-    if (frame.width != width or frame.height != height) {
+    const frame_capacity_width = frame.width;
+    const frame_capacity_height = frame.height;
+    if (width <= 0 or height <= 0 or width > frame_capacity_width or height > frame_capacity_height) {
         return -1;
     }
 
@@ -131,6 +144,13 @@ fn queuePushLocked(
             const dst_base: [*]u8 = @ptrCast(frame.planes[@intCast(plane_idx)]);
             const src_stride: usize = @intCast(src_linesizes[@intCast(plane_idx)]);
             const dst_stride: usize = @intCast(frame.linesizes[@intCast(plane_idx)]);
+            const plane_capacity = pipeline.upload_plane_sizes[@intCast(plane_idx)];
+            if (geometry.rows > 0) {
+                const required_bytes = (geometry.rows - 1) * dst_stride + geometry.row_bytes;
+                if (required_bytes > plane_capacity) {
+                    return -1;
+                }
+            }
 
             var row: usize = 0;
             while (row < geometry.rows) : (row += 1) {
@@ -152,6 +172,8 @@ fn queuePushLocked(
     releaseGpuToken(&frame.gpu_token);
     frame.gpu_token = retained_gpu_token;
     frame.plane_count = if (gpu_only_frame) 0 else expected_plane_count;
+    frame.width = width;
+    frame.height = height;
     frame.pts = pts;
     pipeline.tail = @mod(pipeline.tail + 1, frameCapacity());
     pipeline.count += 1;
@@ -280,49 +302,63 @@ fn decodeThreadMain(userdata: ?*anyopaque) callconv(.c) c_int {
             continue;
         }
 
-        const format = c.player_get_video_format(pipeline.player);
-        const source_hw = c.player_is_video_hw_enabled(pipeline.player);
-        const gpu_token = c.player_get_video_hw_frame_token(pipeline.player);
         var planes: [3][*c]u8 = .{ null, null, null };
         var linesizes: [3]c_int = .{ 0, 0, 0 };
         var plane_count: c_int = 0;
-        const gpu_only_frame = decodeShouldSkipPlaneExtraction(true_zero_copy_active, source_hw, gpu_token);
+        const video_mutex = pipeline.player.*.video_decode_mutex;
+        if (video_mutex != null) {
+            _ = c.SDL_LockMutex(video_mutex);
+        }
 
-        if (!gpu_only_frame) {
-            const expected_plane_count = planeCountForFormat(format);
-            if (expected_plane_count > 1) {
-                if (c.player_get_video_planes(pipeline.player, &planes, &linesizes, &plane_count) != 0) {
-                    c.SDL_Delay(1);
-                    continue;
+        var queued = false;
+        blk: {
+            const format = c.player_get_video_format(pipeline.player);
+            const source_hw = c.player_is_video_hw_enabled(pipeline.player);
+            const gpu_token = c.player_get_video_hw_frame_token(pipeline.player);
+            const gpu_only_frame = decodeShouldSkipPlaneExtraction(true_zero_copy_active, source_hw, gpu_token);
+
+            if (!gpu_only_frame) {
+                const expected_plane_count = planeCountForFormat(format);
+                if (expected_plane_count > 1) {
+                    if (c.player_get_video_planes(pipeline.player, &planes, &linesizes, &plane_count) != 0) {
+                        break :blk;
+                    }
+                } else {
+                    if (c.player_get_video_frame(pipeline.player, &planes[0], &linesizes[0]) != 0) {
+                        break :blk;
+                    }
+                    plane_count = 1;
                 }
-            } else {
-                if (c.player_get_video_frame(pipeline.player, &planes[0], &linesizes[0]) != 0) {
-                    c.SDL_Delay(1);
-                    continue;
+            }
+
+            const pts = c.player_get_video_pts(pipeline.player);
+            const dimensions = decodeDimensions(pipeline.player);
+
+            _ = c.SDL_LockMutex(pipeline.queue_mutex);
+            defer _ = c.SDL_UnlockMutex(pipeline.queue_mutex);
+
+            if (pipeline.decode_running != 0) {
+                if (pipeline.pts_offset_valid == 0) {
+                    pipeline.pts_offset = pts - pipeline.expected_start_pts;
+                    pipeline.pts_offset_valid = 1;
                 }
-                plane_count = 1;
+
+                const adjusted_pts = pts - pipeline.pts_offset;
+                if (queuePushLocked(pipeline, &planes, &linesizes, plane_count, dimensions.width, dimensions.height, format, source_hw, gpu_token, adjusted_pts) == 0) {
+                    queued = true;
+                }
+                running = pipeline.decode_running;
             }
         }
 
-        const pts = c.player_get_video_pts(pipeline.player);
-
-        _ = c.SDL_LockMutex(pipeline.queue_mutex);
-        if (pipeline.decode_running != 0) {
-            if (pipeline.pts_offset_valid == 0) {
-                pipeline.pts_offset = pts - pipeline.expected_start_pts;
-                pipeline.pts_offset_valid = 1;
-            }
-
-            const adjusted_pts = pts - pipeline.pts_offset;
-            if (queuePushLocked(pipeline, &planes, &linesizes, plane_count, pipeline.player.*.width, pipeline.player.*.height, format, source_hw, gpu_token, adjusted_pts) != 0) {
-                _ = c.SDL_UnlockMutex(pipeline.queue_mutex);
-                c.SDL_Delay(1);
-                continue;
-            }
+        if (video_mutex != null) {
+            _ = c.SDL_UnlockMutex(video_mutex);
         }
 
-        running = pipeline.decode_running;
-        _ = c.SDL_UnlockMutex(pipeline.queue_mutex);
+        if (!queued) {
+            c.SDL_Delay(1);
+            continue;
+        }
 
         if (running == 0) {
             break;
@@ -642,10 +678,29 @@ test "queuePushLocked records frame format metadata" {
     pipeline.frames[0].linesizes[0] = 8;
     pipeline.frames[0].width = 2;
     pipeline.frames[0].height = 1;
+    pipeline.upload_plane_sizes[0] = dst.len;
 
     try std.testing.expectEqual(@as(c_int, 0), queuePushLocked(&pipeline, &src_planes, &src_linesizes, 1, 2, 1, c.VIDEO_FRAME_FORMAT_RGBA, 0, 0, 1.5));
     try std.testing.expectEqual(@as(c_int, c.VIDEO_FRAME_FORMAT_RGBA), pipeline.frames[0].format);
     try std.testing.expectEqual(@as(c_int, 1), pipeline.frames[0].plane_count);
+}
+
+test "queuePushLocked allows decoded dimensions within preallocated capacity" {
+    var pipeline: c.VideoPipeline = std.mem.zeroes(c.VideoPipeline);
+    var src: [16]u8 = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+    var dst: [64]u8 = [_]u8{0} ** 64;
+    var src_planes: [3][*c]u8 = .{ src[0..].ptr, null, null };
+    var src_linesizes: [3]c_int = .{ 8, 0, 0 };
+
+    pipeline.frames[0].planes[0] = dst[0..].ptr;
+    pipeline.frames[0].linesizes[0] = 8;
+    pipeline.frames[0].width = 2;
+    pipeline.frames[0].height = 2;
+    pipeline.upload_plane_sizes[0] = dst.len;
+
+    try std.testing.expectEqual(@as(c_int, 0), queuePushLocked(&pipeline, &src_planes, &src_linesizes, 1, 1, 1, c.VIDEO_FRAME_FORMAT_RGBA, 0, 0, 0.1));
+    try std.testing.expectEqual(@as(c_int, 1), pipeline.frames[0].width);
+    try std.testing.expectEqual(@as(c_int, 1), pipeline.frames[0].height);
 }
 
 test "queuePopToUploadLocked swaps plane ownership" {

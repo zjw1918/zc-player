@@ -11,15 +11,6 @@ const c = @cImport({
 const frame_format_rgba: c_int = 0;
 const frame_format_nv12: c_int = 2;
 
-fn probeTrueZeroCopySupportForValue(flag_value: ?[]const u8, has_vt: bool, is_macos: bool) bool {
-    if (!is_macos or !has_vt) {
-        return false;
-    }
-
-    const value = flag_value orelse return true;
-    return value.len == 0 or value[0] != '0';
-}
-
 fn trueZeroCopyActiveForStreak(capable: bool, hw_frame_streak: u32, threshold: u32) bool {
     return capable and hw_frame_streak >= threshold;
 }
@@ -90,15 +81,9 @@ pub const MacVideoToolboxBackend = struct {
         }
 
         const has_vt = c.av_hwdevice_find_type_by_name("videotoolbox") != c.AV_HWDEVICE_TYPE_NONE;
-        const probe_flag = std.posix.getenv("ZC_EXPERIMENTAL_TRUE_ZERO_COPY");
-        const probe_enabled = probeTrueZeroCopySupportForValue(
-            if (probe_flag) |value| std.mem.sliceTo(value, 0) else null,
-            has_vt,
-            is_macos,
-        );
         return .{
             .interop_handle = has_vt,
-            .true_zero_copy = probe_enabled,
+            .true_zero_copy = false,
             .supports_nv12 = has_vt,
             .supports_yuv420p = has_vt,
         };
@@ -231,15 +216,10 @@ test "mac backend returns interop handle after submit" {
     try std.testing.expect(handle != null);
 }
 
-test "true-zero-copy probe defaults on and allows explicit disable" {
-    try std.testing.expect(probeTrueZeroCopySupportForValue(null, true, true));
-    try std.testing.expect(!probeTrueZeroCopySupportForValue("0", true, true));
-    try std.testing.expect(probeTrueZeroCopySupportForValue("1", true, true));
-}
-
-test "true zero-copy probe still requires platform capability" {
-    try std.testing.expect(!probeTrueZeroCopySupportForValue("1", false, true));
-    try std.testing.expect(!probeTrueZeroCopySupportForValue("1", true, false));
+test "true zero-copy capability is disabled by policy" {
+    var backend = MacVideoToolboxBackend{};
+    const caps = backend.capabilities();
+    try std.testing.expect(!caps.true_zero_copy);
 }
 
 test "true zero-copy active requires sustained hardware frames" {

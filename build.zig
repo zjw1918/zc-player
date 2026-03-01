@@ -42,6 +42,7 @@ fn configureNativeDeps(b: *std.Build, step: *std.Build.Step.Compile) void {
             "third_party/imgui/imgui_tables.cpp",
             "third_party/imgui/imgui_widgets.cpp",
             "third_party/imgui/backends/imgui_impl_sdl3.cpp",
+            "third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp",
             "third_party/imgui/backends/imgui_impl_vulkan.cpp",
         },
     });

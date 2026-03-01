@@ -13,7 +13,7 @@ static const char* required_validation_layers[] = {
 
 static AppRenderBackend select_render_backend(void) {
     const char* value = getenv("ZC_RENDER_BACKEND");
-    if (value != NULL && strcmp(value, "sdl") == 0) {
+    if (value != NULL && SDL_strcasecmp(value, "sdl") == 0) {
         return APP_RENDER_BACKEND_SDL;
     }
     return APP_RENDER_BACKEND_VULKAN;

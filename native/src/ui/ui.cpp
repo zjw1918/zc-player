@@ -6,6 +6,7 @@
 #include <string.h>
 #include "imgui.h"
 #include "backends/imgui_impl_sdl3.h"
+#include "backends/imgui_impl_sdlrenderer3.h"
 #include "backends/imgui_impl_vulkan.h"
 
 typedef struct {
@@ -21,6 +22,7 @@ typedef struct {
     PlaybackSnapshot snapshot;
     int has_snapshot;
     int show_debug_panel;
+    int use_sdl_renderer;
     int initialized;
 } UIRuntime;
 
@@ -137,6 +139,21 @@ static const char* hw_policy_label(int policy) {
     }
 }
 
+static const char* render_backend_label(const App* app) {
+    if (!app) {
+        return "unknown";
+    }
+
+    switch (app->render_backend) {
+        case APP_RENDER_BACKEND_SDL:
+            return "sdl";
+        case APP_RENDER_BACKEND_VULKAN:
+            return "vulkan";
+        default:
+            return "unknown";
+    }
+}
+
 static void draw_debug_panel(const PlaybackSnapshot* snapshot) {
     if (!snapshot) {
         return;
@@ -176,6 +193,7 @@ static void draw_debug_panel(const PlaybackSnapshot* snapshot) {
     }
 
     ImGui::Separator();
+    ImGui::Text("Render Backend: %s", render_backend_label(g_ui_runtime.app));
     ImGui::Text("HW Decode: %s", snapshot->video_hw_enabled ? "on" : "off");
     ImGui::Text("HW Backend: %s", hw_backend_label(snapshot->video_hw_backend));
     ImGui::Text("HW Policy: %s", hw_policy_label(snapshot->video_hw_policy));
@@ -213,6 +231,27 @@ int ui_init(App* app) {
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::StyleColorsDark();
+
+    if (app->render_backend == APP_RENDER_BACKEND_SDL) {
+        if (!app->sdl_renderer) {
+            ui_shutdown();
+            return -1;
+        }
+
+        if (!ImGui_ImplSDL3_InitForSDLRenderer(app->window, app->sdl_renderer)) {
+            ui_shutdown();
+            return -1;
+        }
+
+        if (!ImGui_ImplSDLRenderer3_Init(app->sdl_renderer)) {
+            ui_shutdown();
+            return -1;
+        }
+
+        g_ui_runtime.use_sdl_renderer = 1;
+        g_ui_runtime.initialized = 1;
+        return 0;
+    }
 
     if (!ImGui_ImplSDL3_InitForVulkan(app->window)) {
         ui_shutdown();
@@ -269,18 +308,22 @@ int ui_init(App* app) {
 }
 
 void ui_shutdown(void) {
-    if (g_ui_runtime.app && g_ui_runtime.app->device) {
+    if (!g_ui_runtime.use_sdl_renderer && g_ui_runtime.app && g_ui_runtime.app->device) {
         vkDeviceWaitIdle(g_ui_runtime.app->device);
     }
 
     if (g_ui_runtime.initialized) {
-        ImGui_ImplVulkan_Shutdown();
+        if (g_ui_runtime.use_sdl_renderer) {
+            ImGui_ImplSDLRenderer3_Shutdown();
+        } else {
+            ImGui_ImplVulkan_Shutdown();
+        }
         ImGui_ImplSDL3_Shutdown();
         ImGui::DestroyContext();
         g_ui_runtime.initialized = 0;
     }
 
-    if (g_ui_runtime.app && g_ui_runtime.app->device && g_ui_runtime.descriptor_pool) {
+    if (!g_ui_runtime.use_sdl_renderer && g_ui_runtime.app && g_ui_runtime.app->device && g_ui_runtime.descriptor_pool) {
         vkDestroyDescriptorPool(g_ui_runtime.app->device, g_ui_runtime.descriptor_pool, NULL);
         g_ui_runtime.descriptor_pool = VK_NULL_HANDLE;
     }
@@ -297,10 +340,11 @@ void ui_shutdown(void) {
     g_ui_runtime.action_tail = 0;
     g_ui_runtime.action_count = 0;
     g_ui_runtime.has_snapshot = 0;
+    g_ui_runtime.use_sdl_renderer = 0;
 }
 
 void ui_on_swapchain_recreated(App* app) {
-    if (!g_ui_runtime.initialized) {
+    if (!g_ui_runtime.initialized || g_ui_runtime.use_sdl_renderer) {
         return;
     }
 
@@ -327,11 +371,15 @@ void ui_new_frame(void) {
         return;
     }
 
-    if (g_ui_runtime.app && g_ui_runtime.app->swapchain_image_count >= 2) {
-        ImGui_ImplVulkan_SetMinImageCount(g_ui_runtime.app->swapchain_image_count);
+    if (g_ui_runtime.use_sdl_renderer) {
+        ImGui_ImplSDLRenderer3_NewFrame();
+    } else {
+        if (g_ui_runtime.app && g_ui_runtime.app->swapchain_image_count >= 2) {
+            ImGui_ImplVulkan_SetMinImageCount(g_ui_runtime.app->swapchain_image_count);
+        }
+        ImGui_ImplVulkan_NewFrame();
     }
 
-    ImGui_ImplVulkan_NewFrame();
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
 }
@@ -451,16 +499,6 @@ void ui_render(UIState* ui, const PlaybackSnapshot* snapshot) {
             g_ui_runtime.show_debug_panel = !g_ui_runtime.show_debug_panel;
         }
 
-        ImGui::Text("Backend: %s", backend_status_label(snapshot->video_backend_status));
-        ImGui::SameLine();
-        ImGui::Text("Fallback: %s", fallback_reason_label(snapshot->video_fallback_reason));
-        ImGui::SameLine();
-        ImGui::Text("HW: %s/%s (%s)",
-                    snapshot->video_hw_enabled ? "on" : "off",
-                    hw_backend_label(snapshot->video_hw_backend),
-                    hw_policy_label(snapshot->video_hw_policy));
-        ImGui::SameLine();
-        ImGui::TextUnformatted("  Space Play/Pause  Left/Right Seek  Up/Down Volume  I Stats");
     }
     ImGui::End();
     ImGui::PopStyleVar(4);
@@ -473,7 +511,18 @@ void ui_render(UIState* ui, const PlaybackSnapshot* snapshot) {
 }
 
 void ui_draw(VkCommandBuffer cmd) {
-    if (!g_ui_runtime.initialized || cmd == VK_NULL_HANDLE) {
+    if (!g_ui_runtime.initialized) {
+        return;
+    }
+
+    if (g_ui_runtime.use_sdl_renderer) {
+        if (g_ui_runtime.app && g_ui_runtime.app->sdl_renderer) {
+            ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), g_ui_runtime.app->sdl_renderer);
+        }
+        return;
+    }
+
+    if (cmd == VK_NULL_HANDLE) {
         return;
     }
 
